@@ -1,0 +1,21 @@
+dependencies:
+  espressif/fmt:
+    component_hash: aad535ae0552e693978867f5e53731c8ae6592092cfb087698b7ec1ddf75c7cb
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 11.0.1
+  idf:
+    source:
+      type: idf
+    version: 5.5.4
+direct_dependencies:
+- espressif/fmt
+- idf
+manifest_hash: 9d576c5088ea439c2ff4502a0a19dc5e35dca707204603932990c6acde44c7e0
+target: esp32s3
+version: 2.0.0
