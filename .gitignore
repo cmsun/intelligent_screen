@@ -3,16 +3,18 @@ build/
 
 .cache
 
+components/
+
 # Managed components (downloaded deps)
 managed_components/
 
 # SDK config backup
-sdkconfig.old
+# sdkconfig.old
 
 # IDE / Editor
-.vscode/
+# .vscode/
 .idea/
-.clangd
+# .clangd
 *.swp
 *.swo
 *~
