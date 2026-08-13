@@ -5,11 +5,11 @@
     "board/esp32s3-builtin.cfg"
   ],
   "idf.port": "detect",
-  "idf.currentSetup": "/home/scm/.espressif/v5.5.4/esp-idf",
+  "idf.currentSetup": "/home/scm/.espressif/release-v6.0/esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
   },
-  "clangd.path": "/home/scm/.espressif/tools/esp-clang/esp-19.1.2_20250312/esp-clang/bin/clangd",
+  "clangd.path": "/home/scm/.espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd",
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
