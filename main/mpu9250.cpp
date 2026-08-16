@@ -35,7 +35,10 @@ constexpr uint8_t REG_I2C_SLV0_CTRL = 0x27;
 constexpr uint8_t REG_I2C_SLV0_DO = 0x63;
 constexpr uint8_t REG_EXT_SENS_DATA_00 = 0x49;
 
-constexpr uint8_t WHO_AM_I_VAL = 0x71;
+// MPU-9250 的 WHO_AM_I 为 0x71；其引脚兼容变体 MPU-9255 为 0x73，
+// 二者寄存器完全一致，此处同时接受以避免误报初始化失败。
+constexpr uint8_t WHO_AM_I_VAL_MPU9250 = 0x71;
+constexpr uint8_t WHO_AM_I_VAL_MPU9255 = 0x73;
 constexpr uint8_t AK8963_ADDR = 0x0C; // 7-bit I2C 地址
 
 // 量程灵敏度（用于原始值 -> 物理量换算）
@@ -169,18 +172,12 @@ void Madgwick::update(const Vec3 &accel, const Vec3 &gyro, const Vec3 &mag,
           (_2bx * q1 + _4bz * q3) *
               (_2bx * (q0 * q2 + q1 * q3) + _2bz * (q1 * q2 - q0 * q3) - mz);
 
-      const float sNorm = std::sqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3);
-      if (sNorm > 1e-6f) {
-        const float inv = 1.0f / sNorm;
-        s0 *= inv;
-        s1 *= inv;
-        s2 *= inv;
-        s3 *= inv;
-        qDot0 -= _beta * s0;
-        qDot1 -= _beta * s1;
-        qDot2 -= _beta * s2;
-        qDot3 -= _beta * s3;
-      }
+      // 标准 Madgwick：beta 直接乘在原始梯度上，不对 s 归一化。
+      // 归一化会破坏梯度下降的物理意义，导致正确解附近持续抖动、漂移。
+      qDot0 -= _beta * s0;
+      qDot1 -= _beta * s1;
+      qDot2 -= _beta * s2;
+      qDot3 -= _beta * s3;
     }
   }
 
@@ -295,9 +292,9 @@ esp_err_t MPU9250::init() noexcept {
 
   uint8_t id = 0;
   read_reg(REG_WHO_AM_I, id);
-  if (id != WHO_AM_I_VAL) {
-    esplog::error("WHO_AM_I=0x{:02X} (expected 0x{:02X}), check wiring/SPI", id,
-                  WHO_AM_I_VAL);
+  if (id != WHO_AM_I_VAL_MPU9250 && id != WHO_AM_I_VAL_MPU9255) {
+    esplog::error("WHO_AM_I=0x{:02X} (expected 0x71 or 0x73), check wiring/SPI",
+                  id);
     return ESP_ERR_NOT_FOUND;
   }
 
@@ -397,6 +394,14 @@ esp_err_t MPU9250::read_raw(ImuSample &out) noexcept {
   }
   out.mag = _last_mag;
   return ESP_OK;
+}
+
+Vec3 MPU9250::euler_deg() const noexcept {
+  Vec3 e = _fusion.euler_deg();
+  // 应用静态零偏校准（roll/pitch 基准偏移）
+  e.x -= _cfg.roll_offset_deg;
+  e.y -= _cfg.pitch_offset_deg;
+  return e;
 }
 
 esp_err_t MPU9250::read(ImuSample &out, float dt) noexcept {

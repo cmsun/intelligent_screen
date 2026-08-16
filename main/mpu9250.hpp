@@ -3,8 +3,10 @@
 #include <array>
 #include <cstdint>
 
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
+#include <driver/gpio.h>
+#include <driver/spi_master.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 namespace imu {
 
@@ -84,6 +86,10 @@ public:
     Vec3 gyro_sign{1.0f, 1.0f, 1.0f};
     Vec3 mag_sign{1.0f, 1.0f, 1.0f};
     bool mag_swap_xy = true; // AK8963 在 MPU-9250 内相对加速度计旋转了约 90°
+
+    // 静态零偏校准（静止水平放置时的输出基准偏移，单位：度）
+    float roll_offset_deg = 0.0f;
+    float pitch_offset_deg = 0.0f;
   };
 
   explicit MPU9250(const Config &cfg) noexcept : _cfg(cfg), _fusion(cfg.beta) {}
@@ -108,7 +114,7 @@ public:
     return _fusion.quaternion();
   }
   [[nodiscard]] Vec3 euler_rad() const noexcept { return _fusion.euler_rad(); }
-  [[nodiscard]] Vec3 euler_deg() const noexcept { return _fusion.euler_deg(); }
+  [[nodiscard]] Vec3 euler_deg() const noexcept;
 
 private:
   // 底层 SPI 辅助函数：init 序列中会忽略返回值，故不加 [[nodiscard]]

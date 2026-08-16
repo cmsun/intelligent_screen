@@ -9,7 +9,7 @@ components/
 managed_components/
 
 # SDK config backup
-# sdkconfig.old
+sdkconfig.old
 
 # IDE / Editor
 # .vscode/
