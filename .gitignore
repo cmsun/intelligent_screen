@@ -12,9 +12,7 @@ managed_components/
 sdkconfig.old
 
 # IDE / Editor
-# .vscode/
 .idea/
-# .clangd
 *.swp
 *.swo
 *~
