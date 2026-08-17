@@ -79,17 +79,33 @@ public:
     uint32_t spi_clock_hz = 1'000'000; // 1 MHz
     uint8_t spi_mode = 3;              // MPU-9250 支持 SPI mode 0 与 3
 
-    float beta = 0.1f; // 融合增益
+    float beta = 0.6f; // 融合增益
 
     // 各轴符号校正（与板卡安装 / 芯片朝向相关，按需翻转 ±1）
-    Vec3 accel_sign{1.0f, 1.0f, 1.0f};
-    Vec3 gyro_sign{1.0f, 1.0f, 1.0f};
+    Vec3 accel_sign{1.0f, 1.0f, -1.0f};
+    Vec3 gyro_sign{1.0f, 1.0f, -1.0f};
     Vec3 mag_sign{1.0f, 1.0f, 1.0f};
     bool mag_swap_xy = true; // AK8963 在 MPU-9250 内相对加速度计旋转了约 90°
 
+    // 磁力计硬磁偏置校准（单位：uT）。水平旋转采集最大最小值后计算：
+    // offset = (max + min) / 2，减去后使读数关于 0 对称。
+    // 实测：mag.x 范围 -12~48 -> offset=18；mag.y 范围 -60~7 -> offset=-26.5
+    Vec3 mag_offset_ut{18.0f, -26.5f, 0.0f};
+
+    // 是否将磁力计纳入姿态融合（默认不融合，仅用加速度计+陀螺仪）
+    bool mag_fusion_enabled = false;
+
+    // 陀螺仪零偏校准（单位：rad/s）。静止时测得的 gyro 输出即为零偏，
+    // 读取时减去，消除长时间积分导致的 yaw 漂移。
+    Vec3 gyro_bias_rad_s{-0.035f, -0.005f, -0.005f};
+
+    // 加速度计零偏校准（单位：m/s^2）。静止水平放置时，理想输出应为
+    // (0, 0, ±g)，实测的 X/Y 非零值即为零偏，读取时减去。
+    Vec3 accel_bias_m_s2{-0.30f, 0.08f, -0.25f};
+
     // 静态零偏校准（静止水平放置时的输出基准偏移，单位：度）
-    float roll_offset_deg = 0.0f;
-    float pitch_offset_deg = 0.0f;
+    float roll_offset_deg = -27.4f;
+    float pitch_offset_deg = -12.1f;
   };
 
   explicit MPU9250(const Config &cfg) noexcept : _cfg(cfg), _fusion(cfg.beta) {}

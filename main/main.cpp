@@ -12,7 +12,7 @@
 namespace {
 
 // IMU 读取线程：栈大小 10K，避免 main 栈溢出
-constexpr uint32_t kImuTaskStackBytes = 10 * 1024; // 10K
+constexpr uint32_t kImuTaskStackBytes = 20 * 1024; // 10K
 constexpr UBaseType_t kImuTaskPriority = 5;
 
 void imu_task(void *arg) {
@@ -63,12 +63,8 @@ extern "C" void app_main(void) {
   // 芯片倒焊：Z 轴重力方向反号（静止 az=-9.5），需翻转符号。
   // X/Y 轴符号待实测确认后一并修正。
   imu::MPU9250::Config imu_cfg{};
-  imu_cfg.accel_sign.z = -1.0f;
-  imu_cfg.gyro_sign.z = -1.0f; // 倒焊时陀螺仪 Z 也同步反号
-  imu_cfg.beta = 0.8f;         // 增大梯度下降增益，加快收敛（原 0.1 偏慢）
-  // 静态零偏校准：垫平静止实测 roll=14.2 pitch=1.1，减去使其归零
-  imu_cfg.roll_offset_deg = 14.2f;
-  imu_cfg.pitch_offset_deg = 1.1f;
+  imu_cfg.mag_fusion_enabled = true; // 启用磁力计融合，锁住 yaw 航向，消除漂移
+
   // 在堆上创建，传入 IMU 线程，避免占用 app_main 的栈
   auto *imu = new (std::nothrow) imu::MPU9250(imu_cfg);
   if (imu == nullptr) {

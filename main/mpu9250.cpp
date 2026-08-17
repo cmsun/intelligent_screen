@@ -366,18 +366,24 @@ esp_err_t MPU9250::read_raw(ImuSample &out) noexcept {
     return e4;
 
   out.accel.x =
-      _cfg.accel_sign.x * to_int16(abuf[0], abuf[1]) * ACCEL_SCALE * G_TO_MS2;
+      _cfg.accel_sign.x * to_int16(abuf[0], abuf[1]) * ACCEL_SCALE * G_TO_MS2 -
+      _cfg.accel_bias_m_s2.x;
   out.accel.y =
-      _cfg.accel_sign.y * to_int16(abuf[2], abuf[3]) * ACCEL_SCALE * G_TO_MS2;
+      _cfg.accel_sign.y * to_int16(abuf[2], abuf[3]) * ACCEL_SCALE * G_TO_MS2 -
+      _cfg.accel_bias_m_s2.y;
   out.accel.z =
-      _cfg.accel_sign.z * to_int16(abuf[4], abuf[5]) * ACCEL_SCALE * G_TO_MS2;
+      _cfg.accel_sign.z * to_int16(abuf[4], abuf[5]) * ACCEL_SCALE * G_TO_MS2 -
+      _cfg.accel_bias_m_s2.z;
 
   out.gyro.x =
-      _cfg.gyro_sign.x * to_int16(gbuf[0], gbuf[1]) * GYRO_SCALE * RAD_PER_DEG;
+      _cfg.gyro_sign.x * to_int16(gbuf[0], gbuf[1]) * GYRO_SCALE * RAD_PER_DEG -
+      _cfg.gyro_bias_rad_s.x;
   out.gyro.y =
-      _cfg.gyro_sign.y * to_int16(gbuf[2], gbuf[3]) * GYRO_SCALE * RAD_PER_DEG;
+      _cfg.gyro_sign.y * to_int16(gbuf[2], gbuf[3]) * GYRO_SCALE * RAD_PER_DEG -
+      _cfg.gyro_bias_rad_s.y;
   out.gyro.z =
-      _cfg.gyro_sign.z * to_int16(gbuf[4], gbuf[5]) * GYRO_SCALE * RAD_PER_DEG;
+      _cfg.gyro_sign.z * to_int16(gbuf[4], gbuf[5]) * GYRO_SCALE * RAD_PER_DEG -
+      _cfg.gyro_bias_rad_s.z;
 
   out.temperature = to_int16(tbuf[0], tbuf[1]) / 333.87f + 21.0f;
 
@@ -389,8 +395,10 @@ esp_err_t MPU9250::read_raw(ImuSample &out) noexcept {
     mraw.z = to_int16(mbuf[6], mbuf[5]) * AK8963_UT_PER_LSB * _mag_asa[2];
     // 将 AK8963 轴对齐到加速度计坐标系（默认交换 X/Y 并取反 Z）
     Vec3 m = _cfg.mag_swap_xy ? Vec3{mraw.y, mraw.x, -mraw.z} : mraw;
-    _last_mag = {m.x * _cfg.mag_sign.x, m.y * _cfg.mag_sign.y,
-                 m.z * _cfg.mag_sign.z};
+    // 减去硬磁偏置（使读数关于 0 对称），再应用符号校正
+    _last_mag = {(m.x - _cfg.mag_offset_ut.x) * _cfg.mag_sign.x,
+                 (m.y - _cfg.mag_offset_ut.y) * _cfg.mag_sign.y,
+                 (m.z - _cfg.mag_offset_ut.z) * _cfg.mag_sign.z};
   }
   out.mag = _last_mag;
   return ESP_OK;
@@ -407,7 +415,9 @@ Vec3 MPU9250::euler_deg() const noexcept {
 esp_err_t MPU9250::read(ImuSample &out, float dt) noexcept {
   esp_err_t err = read_raw(out);
   if (err == ESP_OK && dt > 0.0f) {
-    _fusion.update(out.accel, out.gyro, out.mag, dt);
+    // 未启用磁力计融合时，传入零磁力计（update 内 mNorm<阈值 会跳过磁力计项）
+    const Vec3 mag = _cfg.mag_fusion_enabled ? out.mag : Vec3{0.0f, 0.0f, 0.0f};
+    _fusion.update(out.accel, out.gyro, mag, dt);
   }
   return err;
 }
