@@ -17,12 +17,11 @@ class MPU9250;
 class MicroRosNode
 {
 public:
-    MicroRosNode() = default;
+    explicit MicroRosNode(imu::MPU9250 &imu) : _imu(imu) {}
     ~MicroRosNode() = default;
 
     /// 初始化 WiFi（micro_ros 组件 WLAN 接口）并启动 micro-ROS 通信任务。
-    /// @param imu 用于发布 IMU 数据的传感器实例
-    void begin(imu::MPU9250 *imu);
+    void begin(void);
 
 private:
     bool _is_connect = false;
@@ -34,7 +33,8 @@ private:
     rcl_subscription_t _velcmd_subscription;
     sensor_msgs__msg__Imu _imu_msg;
     geometry_msgs__msg__Twist _velcmd_msg;
-    imu::MPU9250 *_imu = nullptr;
+    // 引用全局常驻的 IMU 实例（构造函数绑定）
+    imu::MPU9250 &_imu;
 
     rcl_ret_t create_entities(void);
     void destroy_entities(void);

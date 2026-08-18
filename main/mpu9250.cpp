@@ -7,6 +7,7 @@
 #include "esplog.hpp"
 
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -193,12 +194,81 @@ void Madgwick::update(const Vec3 &accel, const Vec3 &gyro, const Vec3 &mag,
 
 // ===================== MPU9250 驱动 =====================
 
+MPU9250 Imu;
+
+namespace {
+
+// 采样线程栈大小（与 main 中 IMU 线程一致，20K 避免栈溢出）
+constexpr uint32_t kImuTaskStackBytes = 20 * 1024;
+constexpr UBaseType_t kImuTaskPriority = 5;
+constexpr float kLogPeriodS = 0.5f; // 5 Hz 文本日志
+
+} // namespace
+
 MPU9250::~MPU9250() {
   if (_dev != nullptr) {
     spi_bus_remove_device(_dev);
     _dev = nullptr;
   }
   // 不在此释放 SPI 总线（可能在别处复用），如需可调用 spi_bus_free。
+}
+
+void MPU9250::begin(void) {
+  // 按配置项设置融合增益
+  _fusion.set_beta(_cfg.beta);
+
+  if (auto err = init(); err != ESP_OK) {
+    esplog::error("MPU-9250 init failed: {}", esp_err_to_name(err));
+    return;
+  }
+  esplog::info("MPU-9250 initialized");
+
+  // 创建采样线程（~200 Hz 读取 + 融合 + 低频日志）
+  TaskHandle_t handle = nullptr;
+  if (xTaskCreate(sample_task, "imu_sample", kImuTaskStackBytes, this,
+                  kImuTaskPriority, &handle) != pdPASS) {
+    esplog::error("Failed to create IMU sample task (stack={} bytes)",
+                  kImuTaskStackBytes);
+    return;
+  }
+}
+
+void MPU9250::sample_task(void *arg) {
+  auto *self = static_cast<MPU9250 *>(arg);
+
+  float last = static_cast<float>(esp_timer_get_time()) / 1.0e6f;
+  float last_log = 0.0f;
+
+  while (true) {
+    const float now = static_cast<float>(esp_timer_get_time()) / 1.0e6f;
+    const float dt = now - last;
+    last = now;
+
+    imu::ImuSample s;
+    if (self->read(s, dt) != ESP_OK) {
+      // 读取失败不刷屏，5s 提示一次
+      static float last_err = 0.0f;
+      if (now - last_err >= 5.0f) {
+        last_err = now;
+        esplog::error("MPU-9250 read failed");
+      }
+    }
+
+    // 降低文本日志频率，避免拖慢融合循环
+    if (now - last_log >= kLogPeriodS) {
+      last_log = now;
+      const ImuSample &ls = self->last_sample();
+      const Vec3 e = self->euler_deg();
+      esplog::debug("accel={:.2f},{:.2f},{:.2f} gyro={:.2f},{:.2f},{:.2f} "
+                   "mag={:.2f},{:.2f},{:.2f} "
+                   "temp={:.2f} | roll={:.1f} pitch={:.1f} yaw={:.1f}",
+                   ls.accel.x, ls.accel.y, ls.accel.z, ls.gyro.x, ls.gyro.y,
+                   ls.gyro.z, ls.mag.x, ls.mag.y, ls.mag.z, ls.temperature, e.x,
+                   e.y, e.z);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(5)); // ~200 Hz 循环
+  }
 }
 
 esp_err_t MPU9250::write_reg(uint8_t reg, uint8_t val) noexcept {
@@ -241,10 +311,6 @@ esp_err_t MPU9250::read_regs(uint8_t reg, uint8_t *out, size_t len) noexcept {
   if (err == ESP_OK)
     std::memcpy(out, rx.data() + 1, len);
   return err;
-}
-
-bool MPU9250::is_data_ready() const noexcept {
-  return gpio_get_level(_cfg.int_pin) == 1;
 }
 
 esp_err_t MPU9250::init() noexcept {

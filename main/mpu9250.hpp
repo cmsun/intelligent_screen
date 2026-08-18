@@ -108,32 +108,30 @@ public:
     float pitch_offset_deg = -12.1f;
   };
 
-  explicit MPU9250(const Config &cfg) noexcept : _cfg(cfg), _fusion(cfg.beta) {}
+  MPU9250() = default;
   ~MPU9250();
 
   MPU9250(const MPU9250 &) = delete;
   MPU9250 &operator=(const MPU9250 &) = delete;
 
-  /// 初始化 SPI 总线、MPU-9250 及内部 AK8963 磁力计。
-  [[nodiscard]] esp_err_t init() noexcept;
+  /// 初始化 SPI 总线、MPU-9250 及内部 AK8963 磁力计，并创建采样线程。
+  /// 与 MotionClass::begin 风格一致：调用后才真正初始化硬件并启动采样。
+  void begin(void);
 
-  /// INT 引脚当前电平（高表示数据就绪，取决于 REG_INT_PIN_CFG 配置）。
-  [[nodiscard]] bool is_data_ready() const noexcept;
+  /// 初始化完成且采样线程已启动。
+  [[nodiscard]] bool is_ready() const noexcept { return _inited; }
 
-  /// 读取并转换 9 轴原始物理量（不更新融合）。
-  [[nodiscard]] esp_err_t read_raw(ImuSample &out) noexcept;
+  /// 配置项（可在 begin 之前修改，begin 之后不再生效）。
+  Config _cfg; // 保持与 motion 风格一致，直接公开可改
 
-  /// 读取传感器并立即执行一次融合；dt 为距上次更新的时间间隔 [s]。
-  [[nodiscard]] esp_err_t read(ImuSample &out, float dt) noexcept;
+  /// 最近一次成功读取的原始样本（采样线程持续更新）。
+  [[nodiscard]] const ImuSample &last_sample() const noexcept { return _last_sample; }
 
   [[nodiscard]] std::array<float, 4> quaternion() const noexcept {
     return _fusion.quaternion();
   }
   [[nodiscard]] Vec3 euler_rad() const noexcept { return _fusion.euler_rad(); }
   [[nodiscard]] Vec3 euler_deg() const noexcept;
-
-  /// 最近一次成功读取的原始样本（read/read_raw 之后有效）。
-  [[nodiscard]] const ImuSample &last_sample() const noexcept { return _last_sample; }
 
 private:
   // 底层 SPI 辅助函数：init 序列中会忽略返回值，故不加 [[nodiscard]]
@@ -142,7 +140,18 @@ private:
   esp_err_t read_regs(uint8_t reg, uint8_t *out, size_t len) noexcept;
   static void delay_ms(uint32_t ms) noexcept { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
-  Config _cfg;
+  /// 初始化 SPI 总线、MPU-9250 及内部 AK8963 磁力计（硬件层）。
+  [[nodiscard]] esp_err_t init() noexcept;
+
+  /// 读取并转换 9 轴原始物理量（不更新融合）。
+  [[nodiscard]] esp_err_t read_raw(ImuSample &out) noexcept;
+
+  /// 读取传感器并立即执行一次融合；dt 为距上次更新的时间间隔 [s]。
+  [[nodiscard]] esp_err_t read(ImuSample &out, float dt) noexcept;
+
+  /// 采样线程：高频读取 + 融合 + 低频日志。
+  static void sample_task(void *arg);
+
   spi_device_handle_t _dev = nullptr;
   Madgwick _fusion;
   std::array<float, 3> _mag_asa{1.0f, 1.0f, 1.0f}; // 磁力计灵敏度校正系数
@@ -150,5 +159,8 @@ private:
   ImuSample _last_sample{}; // 最近一次成功读取的完整样本
   bool _inited = false;
 };
+
+/// 全局 IMU 实例（与 MotionClass Motion 风格一致）。
+extern MPU9250 Imu;
 
 } // namespace imu

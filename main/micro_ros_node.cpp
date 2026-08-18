@@ -24,7 +24,7 @@ extern "C"
 #include "uros_network_interfaces.h"
 }
 
-MicroRosNode RosNode;
+MicroRosNode RosNode(imu::Imu);
 
 #define RCCHECK(fn)                                                                                                    \
     do                                                                                                                 \
@@ -48,9 +48,8 @@ MicroRosNode RosNode;
         }                                                                                                              \
     } while (0)
 
-void MicroRosNode::begin(imu::MPU9250 *imu)
+void MicroRosNode::begin(void)
 {
-    _imu = imu;
     // 连接 WiFi（micro_ros 组件 WLAN 网络接口，SSID/密码由 Kconfig 配置）
     ESP_ERROR_CHECK(uros_network_interface_initialize());
     xTaskCreatePinnedToCore(micro_ros_node_task, "micro_ros_node_task", 1024 * 30, this, 1, nullptr, 1);
@@ -121,19 +120,14 @@ void MicroRosNode::destroy_entities(void)
 
 void MicroRosNode::imu_publish(void)
 {
-    if (_imu == nullptr)
-    {
-        return;
-    }
-
-    const imu::ImuSample &s = _imu->last_sample();
+    const imu::ImuSample &s = _imu.last_sample();
     const int64_t now_us = esp_timer_get_time();
 
     _imu_msg.header.stamp.sec = static_cast<int32_t>(now_us / 1000000);
     _imu_msg.header.stamp.nanosec = static_cast<uint32_t>((now_us % 1000000) * 1000);
     rosidl_runtime_c__String__assign(&_imu_msg.header.frame_id, "imu_link");
 
-    const std::array<float, 4> q = _imu->quaternion(); // (w, x, y, z)
+    const std::array<float, 4> q = _imu.quaternion(); // (w, x, y, z)
     _imu_msg.orientation.x = q[1];
     _imu_msg.orientation.y = q[2];
     _imu_msg.orientation.z = q[3];
@@ -172,9 +166,11 @@ void MicroRosNode::micro_ros_node_task(void *arg)
 
     while (true)
     {
+        // 无论是否已连接，每轮循环都喂狗，避免等待 Agent 上线期间看门狗超时
+        esp_task_wdt_reset();
+
         if (self->_is_connect)
         {
-            esp_task_wdt_reset();
             self->imu_publish();
             RCLCHECK(rclc_executor_spin_some(&self->_executor, RCL_MS_TO_NS(100)));
             vTaskDelay(pdMS_TO_TICKS(100));
