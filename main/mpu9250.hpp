@@ -132,6 +132,9 @@ public:
   [[nodiscard]] Vec3 euler_rad() const noexcept { return _fusion.euler_rad(); }
   [[nodiscard]] Vec3 euler_deg() const noexcept;
 
+  /// 最近一次成功读取的原始样本（read/read_raw 之后有效）。
+  [[nodiscard]] const ImuSample &last_sample() const noexcept { return _last_sample; }
+
 private:
   // 底层 SPI 辅助函数：init 序列中会忽略返回值，故不加 [[nodiscard]]
   esp_err_t write_reg(uint8_t reg, uint8_t val) noexcept;
@@ -144,6 +147,7 @@ private:
   Madgwick _fusion;
   std::array<float, 3> _mag_asa{1.0f, 1.0f, 1.0f}; // 磁力计灵敏度校正系数
   Vec3 _last_mag{}; // 最近一次有效磁力计读数（DRDY 前复用）
+  ImuSample _last_sample{}; // 最近一次成功读取的完整样本
   bool _inited = false;
 };
 

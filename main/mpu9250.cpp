@@ -401,6 +401,7 @@ esp_err_t MPU9250::read_raw(ImuSample &out) noexcept {
                  (m.z - _cfg.mag_offset_ut.z) * _cfg.mag_sign.z};
   }
   out.mag = _last_mag;
+  _last_sample = out;
   return ESP_OK;
 }
 
