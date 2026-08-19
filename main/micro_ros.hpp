@@ -1,5 +1,4 @@
-#ifndef __MICRO_ROS_NODE_HPP__
-#define __MICRO_ROS_NODE_HPP__
+#pragma once
 
 #include <rcl/rcl.h>
 #include <rclc/executor.h>
@@ -38,9 +37,7 @@ private:
     void destroy_entities(void);
     void imu_publish(void);
     static void velcmd_subscribe_callback(const void *arg);
-    static void micro_ros_node_task(void *arg);
+    static void micro_ros_task(void *arg);
 };
 
 extern MicroRosNode RosNode;
-
-#endif

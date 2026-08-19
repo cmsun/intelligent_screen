@@ -1,5 +1,4 @@
-#ifndef __MOTION_H__
-#define __MOTION_H__
+#pragma once
 
 #include <chrono>
 #include <condition_variable>
@@ -127,5 +126,3 @@ constexpr std::ostream &operator<<(std::ostream &os, const MotionClass::DriveMod
 }
 
 extern MotionClass Motion;
-
-#endif // __MOTION_H__

@@ -1,5 +1,5 @@
 #include "esplog.hpp"
-#include "micro_ros_node.hpp"
+#include "micro_ros.hpp"
 #include "motion.hpp"
 #include "mpu9250.hpp"
 
@@ -11,7 +11,7 @@ extern "C" void app_main(void) {
   // 初始化任务看门狗（超时 3 秒，超时触发 panic）
   // 注意：不要 esp_task_wdt_add(NULL) 把 main 任务加入监控，
   // 因为 app_main 马上返回、main 任务退出，不会再喂狗，会误触发看门狗。
-  // 各常驻任务（imu_sample / motion_task / micro_ros_node_task）在各自线程内
+  // 各常驻任务（imu_sample / motion_task / micro_ros_task）在各自线程内
   // 自行 esp_task_wdt_add + esp_task_wdt_reset 管理。
   esp_task_wdt_config_t wdt_cfg = {
       .timeout_ms = 3000,      // 3 秒超时

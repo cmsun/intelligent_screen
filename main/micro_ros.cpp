@@ -15,7 +15,7 @@
 #include <rosidl_runtime_c/string_functions.h>
 
 #include "esplog.hpp"
-#include "micro_ros_node.hpp"
+#include "micro_ros.hpp"
 #include "motion.hpp"
 #include "mpu9250.hpp"
 
@@ -52,7 +52,7 @@ void MicroRosNode::begin(void)
 {
     // 连接 WiFi（micro_ros 组件 WLAN 网络接口，SSID/密码由 Kconfig 配置）
     ESP_ERROR_CHECK(uros_network_interface_initialize());
-    xTaskCreatePinnedToCore(micro_ros_node_task, "micro_ros_node_task", 1024 * 30, this, 1, nullptr, 1);
+    xTaskCreatePinnedToCore(micro_ros_task, "micro_ros_node_task", 1024 * 30, this, 1, nullptr, 1);
 }
 
 rcl_ret_t MicroRosNode::create_entities(void)
@@ -159,7 +159,7 @@ void MicroRosNode::velcmd_subscribe_callback(const void *arg)
     Motion.set_chassis_speed(static_cast<float>(msg->linear.x), static_cast<float>(msg->angular.z));
 }
 
-void MicroRosNode::micro_ros_node_task(void *arg)
+void MicroRosNode::micro_ros_task(void *arg)
 {
     auto *self = static_cast<MicroRosNode *>(arg);
     esp_task_wdt_add(nullptr);
@@ -173,7 +173,7 @@ void MicroRosNode::micro_ros_node_task(void *arg)
         {
             self->imu_publish();
             RCLCHECK(rclc_executor_spin_some(&self->_executor, RCL_MS_TO_NS(100)));
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
         else
         {
