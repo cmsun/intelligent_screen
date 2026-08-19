@@ -8,8 +8,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-namespace imu {
-
 /// 三维向量（物理单位见各使用处）
 struct Vec3 {
   float x = 0.0f;
@@ -160,7 +158,5 @@ private:
   bool _inited = false;
 };
 
-/// 全局 IMU 实例（与 MotionClass Motion 风格一致）。
+/// 全局 IMU 实例
 extern MPU9250 Imu;
-
-} // namespace imu

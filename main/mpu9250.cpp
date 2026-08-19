@@ -11,7 +11,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-namespace imu {
 namespace {
 
 // ---- MPU-9250 (MPU-6500 部分) 寄存器 ----
@@ -244,7 +243,7 @@ void MPU9250::sample_task(void *arg) {
     const float dt = now - last;
     last = now;
 
-    imu::ImuSample s;
+    ImuSample s;
     if (self->read(s, dt) != ESP_OK) {
       // 读取失败不刷屏，5s 提示一次
       static float last_err = 0.0f;
@@ -488,5 +487,3 @@ esp_err_t MPU9250::read(ImuSample &out, float dt) noexcept {
   }
   return err;
 }
-
-} // namespace imu

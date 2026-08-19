@@ -10,14 +10,12 @@
 #include <geometry_msgs/msg/twist.h>
 #include <sensor_msgs/msg/imu.h>
 
-namespace imu {
 class MPU9250;
-} // namespace imu
 
 class MicroRosNode
 {
 public:
-    explicit MicroRosNode(imu::MPU9250 &imu) : _imu(imu) {}
+    explicit MicroRosNode(MPU9250 &imu) : _imu(imu) {}
     ~MicroRosNode() = default;
 
     /// 初始化 WiFi（micro_ros 组件 WLAN 接口）并启动 micro-ROS 通信任务。
@@ -34,7 +32,7 @@ private:
     sensor_msgs__msg__Imu _imu_msg;
     geometry_msgs__msg__Twist _velcmd_msg;
     // 引用全局常驻的 IMU 实例（构造函数绑定）
-    imu::MPU9250 &_imu;
+    MPU9250 &_imu;
 
     rcl_ret_t create_entities(void);
     void destroy_entities(void);

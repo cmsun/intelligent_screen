@@ -24,7 +24,7 @@ extern "C"
 #include "uros_network_interfaces.h"
 }
 
-MicroRosNode RosNode(imu::Imu);
+MicroRosNode RosNode(Imu);
 
 #define RCCHECK(fn)                                                                                                    \
     do                                                                                                                 \
@@ -120,7 +120,7 @@ void MicroRosNode::destroy_entities(void)
 
 void MicroRosNode::imu_publish(void)
 {
-    const imu::ImuSample &s = _imu.last_sample();
+    const ImuSample &s = _imu.last_sample();
     const int64_t now_us = esp_timer_get_time();
 
     _imu_msg.header.stamp.sec = static_cast<int32_t>(now_us / 1000000);

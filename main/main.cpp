@@ -25,11 +25,11 @@ extern "C" void app_main(void) {
   esplog::info("Motion initialized");
 
   // IMU 初始化并启动采样线程（begin 内部创建采样线程）
-  imu::Imu.begin();
+  Imu.begin();
   esplog::info("Imu initialized");
 
   // micro-ROS 通信：WiFi 连接 + Agent 重连 + IMU 发布/速度指令订阅
-  // RosNode 已在全局构造时绑定 imu::Imu 引用
+  // RosNode 已在全局构造时绑定 Imu 引用
   RosNode.begin();
 
   // app_main 到此返回；Imu 为全局实例常驻，Motion/RosNode 各自在独立线程运行。
