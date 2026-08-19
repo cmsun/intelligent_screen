@@ -1,8 +1,10 @@
 #include <array>
 #include <cstdint>
 
+#include <esp_event.h>
 #include <esp_task_wdt.h>
 #include <esp_timer.h>
+#include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <rcl/error_handling.h>
@@ -50,14 +52,76 @@ MicroRosNode RosNode(Imu);
 
 void MicroRosNode::begin(void)
 {
-    // 连接 WiFi（micro_ros 组件 WLAN 网络接口，SSID/密码由 Kconfig 配置）
-    ESP_ERROR_CHECK(uros_network_interface_initialize());
-    xTaskCreatePinnedToCore(micro_ros_task, "micro_ros_node_task", 1024 * 30, this, 1, nullptr, 1);
+    // WiFi 初始化放到独立任务：uros_network_interface_initialize() 内部会阻塞等待
+    // 连上或耗尽重试次数（portMAX_DELAY），直接在这里调用会卡死 begin()。
+    // 连上 WiFi（拿到 IP）后 _wifi_connected 被置位，micro_ros_task 据此再创建 ROS 实体。
+    xTaskCreatePinnedToCore(netif_init_task, "netif_init", 1024 * 6, this, 1, nullptr, 1);
+    xTaskCreatePinnedToCore(micro_ros_task, "micro_ros_task", 1024 * 30, this, 1, nullptr, 1);
+}
+
+void MicroRosNode::wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    auto *self = static_cast<MicroRosNode *>(arg);
+
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
+        const auto *reason = static_cast<wifi_event_sta_disconnected_t *>(event_data);
+        self->_wifi_connected = false;
+        esplog::warn("WiFi disconnected, reason: {}", static_cast<int>(reason->reason));
+        return;
+    }
+
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        self->_wifi_connected = true;
+        esplog::info("WiFi connected, got IP");
+    }
+}
+
+void MicroRosNode::netif_init_task(void *arg)
+{
+    auto *self = static_cast<MicroRosNode *>(arg);
+    esp_task_wdt_add(nullptr);
+
+    // 注册事件处理器：WiFi 断开 / 拿到 IP 时由 wifi_event_handler 更新 _wifi_connected
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event_handler, self));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, self));
+
+    // 阻塞式初始化：最多重试 CONFIG_ESP_MAXIMUM_RETRY 次，失败后 WiFi 停在断开状态。
+    // 因为运行在独立任务中，阻塞不影响其他任务。
+    uros_network_interface_initialize();
+
+    // 判断 _wifi_connected：未连接则不断重连；已连接则等待断开事件清除 flag 后自动进入重连循环
+    while (true)
+    {
+        esp_task_wdt_reset();
+
+        if (!self->_wifi_connected)
+        {
+            // SSID/密码组件已配置并 esp_wifi_start()，这里只需反复调用 esp_wifi_connect()，
+            // 直到 GOT_IP 事件将 _wifi_connected 置位
+            esplog::warn("WiFi not connected, reconnecting ...");
+            esp_wifi_connect();
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        }
+        else
+        {
+            // 已连接：_wifi_connected 由断开事件清除，此处只需轮询检测状态变化
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
 }
 
 rcl_ret_t MicroRosNode::create_entities(void)
 {
     _allocator = rcl_get_default_allocator();
+
+    // 先零初始化所有实体对象，保证中途失败后 destroy_entities() 可以安全清理半成品
+    _support = {};
+    _node = rcl_get_zero_initialized_node();
+    _imu_publisher = rcl_get_zero_initialized_publisher();
+    _velcmd_subscription = rcl_get_zero_initialized_subscription();
+    _executor = rclc_executor_get_zero_initialized_executor();
 
     // 配置 Agent 的 IP 与端口（UDP 传输）
     rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
@@ -169,10 +233,35 @@ void MicroRosNode::micro_ros_task(void *arg)
         // 无论是否已连接，每轮循环都喂狗，避免等待 Agent 上线期间看门狗超时
         esp_task_wdt_reset();
 
-        if (self->_is_connect)
+        // 等待 WiFi 就绪（_wifi_connected 由 wifi_event_handler 维护），未就绪则轮询等待
+        if (!self->_wifi_connected)
+        {
+            if(self->_is_connect)
+            {
+                self->destroy_entities();
+                self->_is_connect = false;
+            }
+            esplog::info("Waiting for WiFi ...");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        else if (self->_is_connect)
         {
             self->imu_publish();
-            RCLCHECK(rclc_executor_spin_some(&self->_executor, RCL_MS_TO_NS(100)));
+            rclc_executor_spin_some(&self->_executor, RCL_MS_TO_NS(100));
+
+            // 每 10 秒 ping 一次 Agent 检测断连；断连则销毁实体并重置连接状态
+            const int64_t now_us = esp_timer_get_time();
+            if (now_us - self->_last_ping_us >= 10 * 1000000)
+            {
+                self->_last_ping_us = now_us;
+                if (rmw_uros_ping_agent(100, 3) != RCL_RET_OK)
+                {
+                    esplog::warn("Agent lost, destroying entities ...");
+                    self->destroy_entities();
+                    self->_is_connect = false;
+                }
+            }
+
             vTaskDelay(pdMS_TO_TICKS(10));
         }
         else
@@ -180,9 +269,17 @@ void MicroRosNode::micro_ros_task(void *arg)
             // 等待 Agent 上线后建立实体
             if (rmw_uros_ping_agent(100, 3) == RCL_RET_OK)
             {
-                RCLCHECK(self->create_entities());
-                self->_is_connect = true;
-                esplog::info("micro-ROS connected, publishing chassis_msgs/imu ...");
+                if (self->create_entities() == RCL_RET_OK)
+                {
+                    self->_is_connect = true;
+                    esplog::info("micro-ROS connected, publishing chassis_msgs/imu ...");
+                }
+                else
+                {
+                    // 创建失败：清理半成品实体，下一轮重新尝试
+                    self->destroy_entities();
+                    esplog::error("create_entities failed, clean up and retry later");
+                }
             }
             vTaskDelay(pdMS_TO_TICKS(1000));
         }

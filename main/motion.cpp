@@ -453,101 +453,101 @@ std::pair<int16_t, int16_t> MotionClass::speed_convert_rpm(float linear, float a
 
 void MotionClass::motion_task(void *arg)
 {
-    auto m = static_cast<MotionClass *>(arg);
-    std::unique_lock<std::mutex> lock(m->_mutex);
+    auto self = static_cast<MotionClass *>(arg);
+    std::unique_lock<std::mutex> lock(self->_mutex);
     esp_task_wdt_add(nullptr);
     while (1)
     {
         esp_task_wdt_reset();
-        if (!m->_is_ready)
+        if (!self->_is_ready)
         {
             // 必须先使能再设置驱动模式
-            if (m->_left_motor_state != State::enable)
+            if (self->_left_motor_state != State::enable)
             {
                 motor_enable(MotorBusID::left);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetEnable);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetEnable);
             }
-            else if (m->_left_motor_mode != DriveMode::speed)
+            else if (self->_left_motor_mode != DriveMode::speed)
             {
                 motor_set_drive_mode(MotorBusID::left, ModeCmd::SetSpeedMode);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetSpeedMode);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetSpeedMode);
             }
-            else if (m->_left_motor_disconnect_stop != true)
+            else if (self->_left_motor_disconnect_stop != true)
             {
                 motor_set_disconnect_stop(MotorBusID::left);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::EnableDisConnectStop);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::EnableDisConnectStop);
             }
-            else if (!m->_left_motor_pid_set)
+            else if (!self->_left_motor_pid_set)
             {
                 motor_set_pid(MotorBusID::left);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetPID);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetPID);
             }
 
             // 必须先使能再设置驱动模式
-            if (m->_right_motor_state != State::enable)
+            if (self->_right_motor_state != State::enable)
             {
                 motor_enable(MotorBusID::right);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetEnable);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetEnable);
             }
-            else if (m->_right_motor_mode != DriveMode::speed)
+            else if (self->_right_motor_mode != DriveMode::speed)
             {
                 motor_set_drive_mode(MotorBusID::right, ModeCmd::SetSpeedMode);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetSpeedMode);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetSpeedMode);
             }
-            else if (m->_right_motor_disconnect_stop != true)
+            else if (self->_right_motor_disconnect_stop != true)
             {
                 motor_set_disconnect_stop(MotorBusID::right);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::EnableDisConnectStop);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::EnableDisConnectStop);
             }
-            else if (!m->_right_motor_pid_set)
+            else if (!self->_right_motor_pid_set)
             {
                 motor_set_pid(MotorBusID::right);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetPID);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetPID);
             }
 
-            if (m->_left_motor_state == State::enable && m->_left_motor_mode == DriveMode::speed &&
-                m->_left_motor_disconnect_stop == true && m->_left_motor_pid_set == true &&
-                m->_right_motor_state == State::enable && m->_right_motor_mode == DriveMode::speed &&
-                m->_right_motor_disconnect_stop == true && m->_right_motor_pid_set == true)
+            if (self->_left_motor_state == State::enable && self->_left_motor_mode == DriveMode::speed &&
+                self->_left_motor_disconnect_stop == true && self->_left_motor_pid_set == true &&
+                self->_right_motor_state == State::enable && self->_right_motor_mode == DriveMode::speed &&
+                self->_right_motor_disconnect_stop == true && self->_right_motor_pid_set == true)
             {
-                m->_is_ready = true;
-                m->_last_plan_time = millis();
+                self->_is_ready = true;
+                self->_last_plan_time = millis();
             }
         }
         else
         {
-            uint32_t interval = millis() - m->_last_plan_time;
-            if (interval > 100)
+            uint32_t dt = millis() - self->_last_plan_time;
+            if (dt > 100)
             {
                 float linear =
-                    velocity_planning(m->_linear_speed_cur, m->_linear_speed_set, m->_linear_speed_acc, interval);
+                    velocity_planning(self->_linear_speed_cur, self->_linear_speed_set, self->_linear_speed_acc, dt);
                 float angular =
-                    velocity_planning(m->_angular_speed_cur, m->_angular_speed_set, m->_angular_speed_acc, interval);
+                    velocity_planning(self->_angular_speed_cur, self->_angular_speed_set, self->_angular_speed_acc, dt);
                 // float linear = m->_linear_speed_set;
                 // float angular = m->_angular_speed_set;
                 auto [left_motor_rpm, right_motor_rpm] = speed_convert_rpm(linear, angular);
-                m->_linear_speed_cur = linear;
-                m->_angular_speed_cur = angular;
-                m->_left_motor_rpm = left_motor_rpm;
-                m->_right_motor_rpm = right_motor_rpm;
-                m->_last_plan_time = millis();
+                self->_linear_speed_cur = linear;
+                self->_angular_speed_cur = angular;
+                self->_left_motor_rpm = left_motor_rpm;
+                self->_right_motor_rpm = right_motor_rpm;
+                self->_last_plan_time = millis();
             }
 
-            motor_set_speed(MotionClass::MotorBusID::left, m->_left_motor_rpm);
-            m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-            m->speed_set_rx_data_process(MotionClass::MotorBusID::left);
+            motor_set_speed(MotionClass::MotorBusID::left, self->_left_motor_rpm);
+            self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+            self->speed_set_rx_data_process(MotionClass::MotorBusID::left);
             vTaskDelay(pdMS_TO_TICKS(5));
-            motor_set_speed(MotionClass::MotorBusID::right, m->_right_motor_rpm);
-            m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-            m->speed_set_rx_data_process(MotionClass::MotorBusID::right);
+            motor_set_speed(MotionClass::MotorBusID::right, self->_right_motor_rpm);
+            self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+            self->speed_set_rx_data_process(MotionClass::MotorBusID::right);
             vTaskDelay(pdMS_TO_TICKS(5));
         }
     }

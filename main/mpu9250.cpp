@@ -8,7 +8,6 @@
 
 #include "esp_err.h"
 #include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 namespace {
@@ -197,8 +196,8 @@ MPU9250 Imu;
 
 namespace {
 
-// 采样线程栈大小（与 main 中 IMU 线程一致，20K 避免栈溢出）
-constexpr uint32_t kImuTaskStackBytes = 20 * 1024;
+// 采样线程栈大小（与 main 中 IMU 线程一致，10K 避免栈溢出）
+constexpr uint32_t kImuTaskStackBytes = 10 * 1024;
 constexpr UBaseType_t kImuTaskPriority = 5;
 constexpr float kLogPeriodS = 0.5f; // 5 Hz 文本日志
 
@@ -222,10 +221,12 @@ void MPU9250::begin(void) {
   }
   esplog::info("MPU-9250 initialized");
 
-  // 创建采样线程（~200 Hz 读取 + 融合 + 低频日志）
+  // 创建采样线程（~200 Hz 读取 + 融合 + 低频日志），固定到 core 1：
+  // core 0 已有 motion/uart_rx 及 WiFi 协议栈任务，IMU 高频采样放 core 1
+  // 可避免被低频任务抢占导致采样周期抖动
   TaskHandle_t handle = nullptr;
-  if (xTaskCreate(sample_task, "imu_sample", kImuTaskStackBytes, this,
-                  kImuTaskPriority, &handle) != pdPASS) {
+  if (xTaskCreatePinnedToCore(sample_task, "imu_sample", kImuTaskStackBytes, this,
+                              kImuTaskPriority, &handle, 1) != pdPASS) {
     esplog::error("Failed to create IMU sample task (stack={} bytes)",
                   kImuTaskStackBytes);
     return;
