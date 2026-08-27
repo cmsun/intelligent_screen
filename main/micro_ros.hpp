@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include <rcl/rcl.h>
 #include <rclc/executor.h>
 #include <rclc/publisher.h>
@@ -22,6 +24,8 @@ public:
 
 private:
     bool _is_connect = false;
+    // begin() 中初始化并配置 Agent 地址，ping 与实体创建均复用该 options
+    rcl_init_options_t _init_options;
     rclc_executor_t _executor;
     rclc_support_t _support;
     rcl_allocator_t _allocator;

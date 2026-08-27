@@ -52,6 +52,23 @@ void MicroRosNode::begin(void)
 {
     // 连接 WiFi（micro_ros 组件 WLAN 网络接口，SSID/密码由 Kconfig 配置）
     ESP_ERROR_CHECK(uros_network_interface_initialize());
+
+    // 一次性配置 Agent 的 IP 与端口（UDP 传输），后续 ping 与实体创建均复用该 options。
+    // 注意：rmw_uros_ping_agent() 无 session 时使用编译期默认地址 127.0.0.1，
+    // 因此必须先把地址写入 init_options，再通过 rmw_uros_ping_agent_options() 使用。
+    _init_options = rcl_get_zero_initialized_init_options();
+    if (rcl_init_options_init(&_init_options, rcl_get_default_allocator()) != RCL_RET_OK)
+    {
+        esplog::error("rcl_init_options_init failed, micro-ROS disabled");
+        return;
+    }
+    rmw_init_options_t *rmw_options = rcl_init_options_get_rmw_init_options(&_init_options);
+    if (rmw_uros_options_set_udp_address(CONFIG_MICRO_ROS_AGENT_IP, CONFIG_MICRO_ROS_AGENT_PORT, rmw_options) != RCL_RET_OK)
+    {
+        esplog::error("rmw_uros_options_set_udp_address failed, micro-ROS disabled");
+        return;
+    }
+
     xTaskCreatePinnedToCore(micro_ros_task, "micro_ros_node_task", 1024 * 30, this, 1, nullptr, 1);
 }
 
@@ -59,13 +76,8 @@ rcl_ret_t MicroRosNode::create_entities(void)
 {
     _allocator = rcl_get_default_allocator();
 
-    // 配置 Agent 的 IP 与端口（UDP 传输）
-    rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
-    RCCHECK(rcl_init_options_init(&init_options, _allocator));
-    rmw_init_options_t *rmw_options = rcl_init_options_get_rmw_init_options(&init_options);
-    RCCHECK(rmw_uros_options_set_udp_address(CONFIG_MICRO_ROS_AGENT_IP, CONFIG_MICRO_ROS_AGENT_PORT, rmw_options));
-
-    RCCHECK(rclc_support_init_with_options(&_support, 0, NULL, &init_options, &_allocator));
+    // Agent 地址已由 begin() 配置到 _init_options，这里直接复用
+    RCCHECK(rclc_support_init_with_options(&_support, 0, NULL, &_init_options, &_allocator));
     RCCHECK(rclc_node_init_default(&_node, "chassis_node", "", &_support));
 
     // 发布 IMU 数据
@@ -87,6 +99,9 @@ rcl_ret_t MicroRosNode::create_entities(void)
 
 void MicroRosNode::destroy_entities(void)
 {
+    rmw_context_t *rmw_context = rcl_context_get_rmw_context(&_support.context);
+    (void)rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
+
     rcl_ret_t ret = rclc_executor_fini(&_executor);
     if (ret != RCL_RET_OK)
     {
@@ -161,8 +176,10 @@ void MicroRosNode::velcmd_subscribe_callback(const void *arg)
 
 void MicroRosNode::micro_ros_task(void *arg)
 {
-    auto *self = static_cast<MicroRosNode *>(arg);
     esp_task_wdt_add(nullptr);
+    auto *self = static_cast<MicroRosNode *>(arg);
+    rmw_init_options_t *rmw_options = rcl_init_options_get_rmw_init_options(&self->_init_options);
+    int64_t last_ping_us = esp_timer_get_time();
 
     while (true)
     {
@@ -172,17 +189,42 @@ void MicroRosNode::micro_ros_task(void *arg)
         if (self->_is_connect)
         {
             self->imu_publish();
-            RCLCHECK(rclc_executor_spin_some(&self->_executor, RCL_MS_TO_NS(100)));
-            vTaskDelay(pdMS_TO_TICKS(10));
+
+            if (rclc_executor_spin_some(&self->_executor, RCL_MS_TO_NS(10)) == RCL_RET_OK)
+            {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+
+            // 每 5 秒 ping 一次 agent，检测连接是否断开；断开则销毁实体，回到重连流程
+            const int64_t now_us = esp_timer_get_time();
+            if (now_us - last_ping_us >= 5LL * 1000 * 1000)
+            {
+                last_ping_us = now_us;
+                if (rmw_uros_ping_agent_options(100, 3, rmw_options) != RCL_RET_OK)
+                {
+                    esplog::warn("micro-ROS agent lost, reconnecting ...");
+                    self->destroy_entities();
+                    self->_is_connect = false;
+                }
+            }
         }
         else
         {
-            // 等待 Agent 上线后建立实体
-            if (rmw_uros_ping_agent(100, 3) == RCL_RET_OK)
+            if (rmw_uros_ping_agent_options(100, 3, rmw_options) == RCL_RET_OK)
             {
-                RCLCHECK(self->create_entities());
-                self->_is_connect = true;
-                esplog::info("micro-ROS connected, publishing chassis_msgs/imu ...");
+                if(self->create_entities() == RCL_RET_OK)
+                {
+                    self->_is_connect = true;
+                    last_ping_us = esp_timer_get_time(); // 重置连接检测计时基准，避免刚连上就触发第一次 ping
+                }
+                else
+                {
+                    esplog::error("micro-ROS agent connected, but create entities failed");
+                }
+            }
+            else
+            {
+                esplog::warn("micro-ROS agent not reachable, retrying ...");
             }
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
