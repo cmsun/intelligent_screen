@@ -4,7 +4,7 @@
   "idf.openOcdConfigs": [
     "board/esp32s3-builtin.cfg"
   ],
-  "idf.port": "/dev/ttyUSB0",
+  "idf.port": "/dev/ttyACM0",
   "idf.currentSetup": "/home/scm/.espressif/release-v6.0/esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
