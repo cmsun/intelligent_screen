@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include <rcl/rcl.h>
@@ -19,13 +20,15 @@ public:
     explicit MicroRosNode(MPU9250 &imu) : _imu(imu) {}
     ~MicroRosNode() = default;
 
-    /// 初始化 WiFi（micro_ros 组件 WLAN 接口）并启动 micro-ROS 通信任务。
+    /// 初始化传输层（WiFi 或串口，由 Kconfig 选择）并启动 micro-ROS 通信任务。
     void begin(void);
 
 private:
     bool _is_connect = false;
-    // begin() 中初始化并配置 Agent 地址，ping 与实体创建均复用该 options
+    // begin() 中初始化并配置 transport 参数（UDP 地址或串口），ping 与实体创建均复用该 options
     rcl_init_options_t _init_options;
+    // 串口传输时传给 transport 回调的 UART 端口号（UDP 模式下不使用）
+    size_t _serial_port = 0;
     rclc_executor_t _executor;
     rclc_support_t _support;
     rcl_allocator_t _allocator;

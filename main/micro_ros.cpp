@@ -19,10 +19,23 @@
 #include "motion.hpp"
 #include "mpu9250.hpp"
 
+// 传输方式由 micro_ros 组件自带的 Kconfig 决定：
+//   micro-ROS Settings -> micro-ROS network interface select
+//     - WLAN interface                -> CONFIG_MICRO_ROS_ESP_NETIF_WLAN
+//     - Ethernet interface            -> CONFIG_MICRO_ROS_ESP_NETIF_ENET
+//     - Micro XRCE-DDS over UART      -> CONFIG_MICRO_ROS_ESP_UART_TRANSPORT
+// 据此在编译期选择不同的 transport 与网络初始化代码。
+#if defined(CONFIG_MICRO_ROS_ESP_UART_TRANSPORT)
+extern "C"
+{
+#include "esp32_serial_transport.h"
+}
+#else
 extern "C"
 {
 #include "uros_network_interfaces.h"
 }
+#endif
 
 MicroRosNode RosNode(Imu);
 
@@ -50,12 +63,19 @@ MicroRosNode RosNode(Imu);
 
 void MicroRosNode::begin(void)
 {
+#if defined(CONFIG_MICRO_ROS_ESP_UART_TRANSPORT)
+    // 串口传输（custom transport）：micro-ROS 直接通过 UART 与 agent 通信，无需 WiFi
+    esplog::info("micro-ROS transport: serial (UART%d, %d baud)", MICRO_ROS_SERIAL_UART_NUM,
+                 MICRO_ROS_SERIAL_BAUDRATE);
+#else
     // 连接 WiFi（micro_ros 组件 WLAN 网络接口，SSID/密码由 Kconfig 配置）
     ESP_ERROR_CHECK(uros_network_interface_initialize());
+    esplog::info("micro-ROS transport: UDP over WiFi");
+#endif
 
-    // 一次性配置 Agent 的 IP 与端口（UDP 传输），后续 ping 与实体创建均复用该 options。
-    // 注意：rmw_uros_ping_agent() 无 session 时使用编译期默认地址 127.0.0.1，
-    // 因此必须先把地址写入 init_options，再通过 rmw_uros_ping_agent_options() 使用。
+    // 一次性配置 transport 参数，后续 ping 与实体创建均复用该 options。
+    // 注意：rmw_uros_ping_agent() 无 session 时使用编译期默认地址（127.0.0.1），
+    // 因此必须先把参数写入 init_options，再通过 rmw_uros_ping_agent_options() 使用。
     _init_options = rcl_get_zero_initialized_init_options();
     if (rcl_init_options_init(&_init_options, rcl_get_default_allocator()) != RCL_RET_OK)
     {
@@ -63,11 +83,24 @@ void MicroRosNode::begin(void)
         return;
     }
     rmw_init_options_t *rmw_options = rcl_init_options_get_rmw_init_options(&_init_options);
+
+#if defined(CONFIG_MICRO_ROS_ESP_UART_TRANSPORT)
+    // 串口传输：注册自定义 transport 回调，args 指向 UART 端口号
+    _serial_port = static_cast<size_t>(MICRO_ROS_SERIAL_UART_NUM);
+    if (rmw_uros_options_set_custom_transport(true, (void *)&_serial_port, esp32_serial_open, esp32_serial_close,
+                                              esp32_serial_write, esp32_serial_read, rmw_options) != RCL_RET_OK)
+    {
+        esplog::error("rmw_uros_options_set_custom_transport failed, micro-ROS disabled");
+        return;
+    }
+#else
+    // UDP 传输：配置 Agent 的 IP 与端口
     if (rmw_uros_options_set_udp_address(CONFIG_MICRO_ROS_AGENT_IP, CONFIG_MICRO_ROS_AGENT_PORT, rmw_options) != RCL_RET_OK)
     {
         esplog::error("rmw_uros_options_set_udp_address failed, micro-ROS disabled");
         return;
     }
+#endif
 
     xTaskCreatePinnedToCore(micro_ros_task, "micro_ros_node_task", 1024 * 30, this, 1, nullptr, 1);
 }
