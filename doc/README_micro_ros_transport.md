@@ -118,7 +118,7 @@ micro-ROS Settings
 传输方式改变后，`libmicroros.a` 必须重建：
 
 ```bash
-cd /home/scm/workspace/esp32_ws/intelligent_screen
+cd ~/workspace/esp32_ws/intelligent_screen
 
 rm -rf components/micro_ros/libmicroros.a \
        components/micro_ros/include \
@@ -129,6 +129,7 @@ rm -rf components/micro_ros/libmicroros.a \
 ### 步骤 5：编译烧录
 
 ```bash
+source ~/.espressif/release-v6.0/esp-idf/export.sh
 idf.py fullclean
 idf.py build flash
 ```

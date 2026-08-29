@@ -63,11 +63,7 @@ MicroRosNode RosNode(Imu);
 
 void MicroRosNode::begin(void)
 {
-#if defined(CONFIG_MICRO_ROS_ESP_UART_TRANSPORT)
-    // 串口传输（custom transport）：micro-ROS 直接通过 UART 与 agent 通信，无需 WiFi
-    esplog::info("micro-ROS transport: serial (UART%d, %d baud)", MICRO_ROS_SERIAL_UART_NUM,
-                 MICRO_ROS_SERIAL_BAUDRATE);
-#else
+#if defined(CONFIG_MICRO_ROS_ESP_NETIF_WLAN)
     // 连接 WiFi（micro_ros 组件 WLAN 网络接口，SSID/密码由 Kconfig 配置）
     ESP_ERROR_CHECK(uros_network_interface_initialize());
     esplog::info("micro-ROS transport: UDP over WiFi");
@@ -108,7 +104,6 @@ void MicroRosNode::begin(void)
 rcl_ret_t MicroRosNode::create_entities(void)
 {
     _allocator = rcl_get_default_allocator();
-
     // Agent 地址已由 begin() 配置到 _init_options，这里直接复用
     RCCHECK(rclc_support_init_with_options(&_support, 0, NULL, &_init_options, &_allocator));
     RCCHECK(rclc_node_init_default(&_node, "chassis_node", "", &_support));
@@ -210,9 +205,9 @@ void MicroRosNode::velcmd_subscribe_callback(const void *arg)
 void MicroRosNode::micro_ros_task(void *arg)
 {
     esp_task_wdt_add(nullptr);
+    int64_t last_ping_us = esp_timer_get_time();
     auto *self = static_cast<MicroRosNode *>(arg);
     rmw_init_options_t *rmw_options = rcl_init_options_get_rmw_init_options(&self->_init_options);
-    int64_t last_ping_us = esp_timer_get_time();
 
     while (true)
     {
@@ -233,16 +228,19 @@ void MicroRosNode::micro_ros_task(void *arg)
             if (now_us - last_ping_us >= 5LL * 1000 * 1000)
             {
                 last_ping_us = now_us;
-                if (rmw_uros_ping_agent_options(100, 3, rmw_options) != RCL_RET_OK)
+                // 已连接：必须走 session 版 ping，复用现有串口，不再 open/close
+                if (rmw_uros_ping_agent(100, 3) != RCL_RET_OK)
                 {
                     esplog::warn("micro-ROS agent lost, reconnecting ...");
-                    self->destroy_entities();
                     self->_is_connect = false;
+                    self->destroy_entities();
                 }
             }
         }
         else
         {
+            // 未连接：ping 成功才创建实体
+            // 走 options 版 ping，传入初始化选项，如果是串口传输，则会自动 open/close 串口
             if (rmw_uros_ping_agent_options(100, 3, rmw_options) == RCL_RET_OK)
             {
                 if(self->create_entities() == RCL_RET_OK)
