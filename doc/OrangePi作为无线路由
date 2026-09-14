@@ -1,0 +1,6 @@
+连接WIFI用于提供上网(SSID:cmsun PASSWORD:351721714)：
+sudo nmcli dev wifi connect cmsun password 351721714
+删除连接：
+sudo nmcli c delete cmsun
+创建一个AP，让其它设备通过OrangePi5的AP上网(要作为一个任务一直运行)：
+sudo create_ap -m nat wlan0 wlan0 orangepi 12345678
