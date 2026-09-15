@@ -1,6 +1,31 @@
 连接WIFI用于提供上网(SSID:cmsun PASSWORD:351721714)：
 sudo nmcli dev wifi connect cmsun password 351721714
+
 删除连接：
 sudo nmcli c delete cmsun
+
 创建一个AP，让其它设备通过OrangePi5的AP上网(要作为一个任务一直运行)：
-sudo create_ap -m nat wlan0 wlan0 orangepi 12345678
+sudo create_ap -m nat wlan0 wlan0 Orangepi 12345678
+
+把创建AP作为一个系统任务
+1.创建hotspot.service文件:
+sudo vim /etc/systemd/system/hotspot.service
+2.在hotspot.service文件里写入以下内容：
+####################################
+[Unit]
+Description=Wi-Fi Hotspot Service
+After=network.target
+
+[Service]
+ExecStart=create_ap -m nat wlan0 wlan0 Orangepi 12345678
+User=root
+
+[Install]
+WantedBy=multi-user.target
+####################################
+3.保存并退出后，依次执行下面命令，让服务生效并设为开机自启：‌‌
+sudo systemctl daemon-reload
+sudo systemctl enable hotspot.service
+sudo systemctl start hotspot.service
+
+
