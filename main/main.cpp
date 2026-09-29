@@ -1,3 +1,4 @@
+#include "battery.hpp"
 #include "bus_servo.hpp"
 #include "esplog.hpp"
 #include "micro_ros.hpp"
@@ -63,20 +64,26 @@ extern "C" void app_main(void) {
   esp_task_wdt_init(&wdt_cfg);
 
   // 底盘电机控制（UART1 驱动电机控制板）
-  Motion.begin();
-  esplog::info("Motion initialized");
+  // Motion.begin();
+  // esplog::info("Motion initialized");
 
   // IMU 初始化并启动采样线程（begin 内部创建采样线程）
-  Imu.begin();
-  esplog::info("Imu initialized");
+  // Imu.begin();
+  // esplog::info("Imu initialized");
+
+  // 电池管理：begin 内部完成 ADC 初始化、用电压初始化 SOC，并创建周期采样任务
+  if (!Battery.begin())
+  {
+    esplog::error("Battery init failed");
+  }
 
   // 总线舵机（UART2 驱动）并启动往复转动测试任务
-  BusServo.begin();
-  xTaskCreate(bus_servo_test_task, "bus_servo_test", 1024 * 4, nullptr, 4, nullptr);
+  // BusServo.begin();
+  // xTaskCreate(bus_servo_test_task, "bus_servo_test", 1024 * 4, nullptr, 4, nullptr);
 
   // micro-ROS 通信：WiFi 连接 + Agent 重连 + IMU 发布/速度指令订阅
   // RosNode 已在全局构造时绑定 Imu 引用
-  RosNode.begin();
+  // RosNode.begin();
 
   // app_main 到此返回；Imu 为全局实例常驻，Motion/RosNode 各自在独立线程运行。
 }
