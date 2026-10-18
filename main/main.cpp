@@ -4,10 +4,25 @@
 #include "micro_ros.hpp"
 #include "motion.hpp"
 #include "mpu9250.hpp"
+#include "xl9535.hpp"
 
 #include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+
+// 风扇测试任务：转 5 秒 -> 停 5 秒，循环往复
+static void fan_test_task(void *arg)
+{
+  constexpr uint32_t kToggleMs = 5000;
+  bool on = false;
+  while (true)
+  {
+    on = !on;
+    Xl9535.set_fan(on);
+    esplog::info("fan {}", on ? "on" : "off");
+    vTaskDelay(pdMS_TO_TICKS(kToggleMs));
+  }
+}
 
 // 总线舵机测试任务：在 0~240 度之间往复转动，每次到位后读取实际位置并打印
 static void bus_servo_test_task(void *arg) {
@@ -49,33 +64,44 @@ static void bus_servo_test_task(void *arg) {
 }
 
 extern "C" void app_main(void) {
-  esplog::init(esplog::level::info);
+  esplog::init(esplog::level::debug);
 
   // 初始化任务看门狗（超时 3 秒，超时触发 panic）
   // 注意：不要 esp_task_wdt_add(NULL) 把 main 任务加入监控，
   // 因为 app_main 马上返回、main 任务退出，不会再喂狗，会误触发看门狗。
   // 各常驻任务（imu_sample / motion_task / micro_ros_task）在各自线程内
   // 自行 esp_task_wdt_add + esp_task_wdt_reset 管理。
-  esp_task_wdt_config_t wdt_cfg = {
-      .timeout_ms = 3000,      // 3 秒超时
-      .idle_core_mask = 0,     // 不监控 idle 任务
-      .trigger_panic = true,   // 超时时触发 panic
-  };
-  esp_task_wdt_init(&wdt_cfg);
+  // esp_task_wdt_config_t wdt_cfg = {
+  //     .timeout_ms = 3000,      // 3 秒超时
+  //     .idle_core_mask = 0,     // 不监控 idle 任务
+  //     .trigger_panic = true,   // 超时时触发 panic
+  // };
+  // esp_task_wdt_init(&wdt_cfg);
 
   // 底盘电机控制（UART1 驱动电机控制板）
   // Motion.begin();
   // esplog::info("Motion initialized");
+
+  // XL9535 GPIO 扩展：风扇输出、地面检测输入、抬头/低头限位输入
+  // begin 内部完成 I2C 初始化、方向配置并创建轮询任务
+  if (!Xl9535.begin())
+  {
+    esplog::error("XL9535 init failed");
+  }
+  else
+  {
+    xTaskCreate(fan_test_task, "fan_test", 1024 * 5, nullptr, 4, nullptr);
+  }
 
   // IMU 初始化并启动采样线程（begin 内部创建采样线程）
   // Imu.begin();
   // esplog::info("Imu initialized");
 
   // 电池管理：begin 内部完成 ADC 初始化、用电压初始化 SOC，并创建周期采样任务
-  if (!Battery.begin())
-  {
-    esplog::error("Battery init failed");
-  }
+  // if (!Battery.begin())
+  // {
+  //   esplog::error("Battery init failed");
+  // }
 
   // 总线舵机（UART2 驱动）并启动往复转动测试任务
   // BusServo.begin();

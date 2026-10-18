@@ -58,7 +58,7 @@ public:
         float idle_current = 0.2f;         // A，|I| 小于该值视为静置（充放电判定用）
         // 充电器在位判定：充电器电压 >= 该值认为充电器接入
         float charger_present_v = 19.0f;   // V
-        uint32_t task_stack = 1024 * 3;    // 采样任务栈大小（字节）
+        uint32_t task_stack = 1024 * 5;    // 采样任务栈大小（字节）
     };
 
     enum class State
