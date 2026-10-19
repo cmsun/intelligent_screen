@@ -52,6 +52,10 @@ bool Xl9535Class::begin(const Config &config)
         .glitch_ignore_cnt = 7,
         .intr_priority = 0,
         .trans_queue_depth = 0,
+        .flags = {
+            .enable_internal_pullup = true,
+            .allow_pd = false
+        },
     };
     if (i2c_new_master_bus(&bus_cfg, &_bus) != ESP_OK)
     {
