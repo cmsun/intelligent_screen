@@ -1,11 +1,13 @@
 #include "motion.hpp"
 
 #include "esplog.hpp"
+#include "fmt/ranges.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <span>
 #include <utility>
 
 #include <driver/gpio.h>
@@ -25,31 +27,24 @@ constexpr int kMotorUartRxPin = 17; // 电机控制板 UART RX（原 Arduino Ser
 constexpr uint32_t kMotorUartBaud = 38400;
 constexpr int kMotorPowerGpio = 39; // 电机电源使能引脚（原 pinMode(39, OUTPUT)）
 
-constexpr uint8_t kCrcPoly = 0x31;
+constexpr uint8_t kCrcPolyReflected = 0x8C; // 0x31 按位反写，右下移实现用
 
-uint8_t reverse8(uint8_t v) noexcept
-{
-    v = static_cast<uint8_t>(((v & 0x55) << 1) | ((v & 0xAA) >> 1));
-    v = static_cast<uint8_t>(((v & 0x33) << 2) | ((v & 0xCC) >> 2));
-    return static_cast<uint8_t>((v << 4) | (v >> 4));
-}
-
-// 与原 Arduino CRC 库 calcCRC8(data, len, 0x31, 0, 0, true, true) 逐位一致：
-// 多项式 0x31、初始值 0、输入不反写(refin=false)、输出反写(refout=true)、最后异或 1
-uint8_t calc_crc8(const uint8_t data[], uint8_t len) noexcept
+// CRC-8/MAXIM：多项式 0x31、初值 0x00、输入反写(refin=true)、输出反写(refout=true)、
+// 结果异或 0x00。这里用低位在前的等价写法：每字节直接异或、右移、命中时异或反写多项式。
+// 校验样例：01 A0 08 00 00 00 00 00 00 -> 0x6F，01 A0 02 00 00 00 00 00 00 -> 0xE4，
+//           01 64 01 2C 00 00 00 00 00 -> 0xA6
+uint8_t calc_crc8(std::span<const uint8_t> data) noexcept
 {
     uint8_t crc = 0;
-    for (uint8_t i = 0; i < len; ++i)
+    for (uint8_t byte : data)
     {
-        crc ^= data[i];
+        crc ^= byte;
         for (uint8_t j = 0; j < 8; ++j)
         {
-            crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ kCrcPoly)
-                               : static_cast<uint8_t>(crc << 1);
+            crc = (crc & 0x01) ? static_cast<uint8_t>((crc >> 1) ^ kCrcPolyReflected)
+                               : static_cast<uint8_t>(crc >> 1);
         }
     }
-    crc = reverse8(crc);
-    crc ^= 0x01;
     return crc;
 }
 
@@ -63,7 +58,7 @@ uint32_t millis() noexcept
 static inline void motor_enable(MotionClass::MotorBusID id)
 {
     uint8_t buff[10] = {uint8_t(id), 0xA0, uint8_t(MotionClass::ModeCmd::SetEnable)};
-    uint8_t crc = calc_crc8(buff, sizeof(buff) - 1);
+    uint8_t crc = calc_crc8(std::span(buff).first(sizeof(buff) - 1));
     buff[sizeof(buff) - 1] = crc;
     uart_write_bytes(kMotorUart, buff, sizeof(buff));
 }
@@ -71,7 +66,7 @@ static inline void motor_enable(MotionClass::MotorBusID id)
 static inline void motor_set_drive_mode(MotionClass::MotorBusID id, MotionClass::ModeCmd mode)
 {
     uint8_t buff[10] = {uint8_t(id), 0xA0, uint8_t(mode)};
-    uint8_t crc = calc_crc8(buff, sizeof(buff) - 1);
+    uint8_t crc = calc_crc8(std::span(buff).first(sizeof(buff) - 1));
     buff[sizeof(buff) - 1] = crc;
     uart_write_bytes(kMotorUart, buff, sizeof(buff));
 }
@@ -79,7 +74,7 @@ static inline void motor_set_drive_mode(MotionClass::MotorBusID id, MotionClass:
 static inline void motor_set_disconnect_stop(MotionClass::MotorBusID id)
 {
     uint8_t buff[10] = {uint8_t(id), 0xA0, uint8_t(MotionClass::ModeCmd::EnableDisConnectStop)};
-    uint8_t crc = calc_crc8(buff, sizeof(buff) - 1);
+    uint8_t crc = calc_crc8(std::span(buff).first(sizeof(buff) - 1));
     buff[sizeof(buff) - 1] = crc;
     uart_write_bytes(kMotorUart, buff, sizeof(buff));
 }
@@ -87,7 +82,7 @@ static inline void motor_set_disconnect_stop(MotionClass::MotorBusID id)
 static inline void motor_set_pid(MotionClass::MotorBusID id)
 {
     uint8_t buff[10] = {uint8_t(id), 0xBD, 0x02, 0x28, 0x00, 0x0A, 0x00, 0x0C, 0x0A};
-    uint8_t crc = calc_crc8(buff, sizeof(buff) - 1);
+    uint8_t crc = calc_crc8(std::span(buff).first(sizeof(buff) - 1));
     buff[sizeof(buff) - 1] = crc;
     uart_write_bytes(kMotorUart, buff, sizeof(buff));
 }
@@ -98,7 +93,7 @@ static inline void motor_set_speed(MotionClass::MotorBusID id, int16_t speed)
     buff[2] = speed >> 8;
     buff[3] = speed & 0xFF;
     buff[6] = 0x02;
-    uint8_t crc = calc_crc8(buff, sizeof(buff) - 1);
+    uint8_t crc = calc_crc8(std::span(buff).first(sizeof(buff) - 1));
     buff[sizeof(buff) - 1] = crc;
     uart_write_bytes(kMotorUart, buff, sizeof(buff));
 }
@@ -148,13 +143,14 @@ void MotionClass::uart_rx_task(void *arg)
         {
             m->_rx_buffer.emplace_back(byte);
         }
+        esplog::debug("motor rx: {:02X}", fmt::join(m->_rx_buffer, " "));
         m->_condition.notify_one();
     }
 }
 
 void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
 {
-    if (_rx_buffer.size() == 10 && _rx_buffer[9] == calc_crc8(_rx_buffer.data(), 9))
+    if (_rx_buffer.size() == 10 && _rx_buffer[9] == calc_crc8(std::span(_rx_buffer).first(9)))
     {
         if (id == MotorBusID::left && static_cast<MotorBusID>(_rx_buffer[0]) == MotorBusID::left)
         {
@@ -168,7 +164,8 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
         }
         else
         {
-            esplog::warn("Wrong sequence.");
+            esplog::warn("Wrong ID.");
+            return;
         }
 
         if (cmd == ModeCmd::SetOpenMode || cmd == ModeCmd::SetCurrentMode || cmd == ModeCmd::SetSpeedMode ||
@@ -186,7 +183,7 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
                 }
                 else
                 {
-                    esplog::warn("Wrong sequence.");
+                    esplog::warn("Wrong ID.");
                 }
             }
         }
@@ -204,7 +201,7 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
                 }
                 else
                 {
-                    esplog::warn("Wrong sequence.");
+                    esplog::warn("Wrong ID.");
                 }
             }
         }
@@ -222,7 +219,7 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
                 }
                 else
                 {
-                    esplog::warn("Wrong sequence.");
+                    esplog::warn("Wrong ID.");
                 }
             }
         }
@@ -240,7 +237,7 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
                 }
                 else
                 {
-                    esplog::warn("Wrong sequence.");
+                    esplog::warn("Wrong ID.");
                 }
             }
         }
@@ -258,7 +255,7 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
                 }
                 else
                 {
-                    esplog::warn("Wrong sequence.");
+                    esplog::warn("Wrong ID.");
                 }
             }
         }
@@ -276,7 +273,7 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
             }
             else
             {
-                esplog::warn("Wrong sequence.");
+                esplog::warn("Wrong ID.");
             }
         }
     }
@@ -314,7 +311,7 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
 
 void MotionClass::speed_set_rx_data_process(MotorBusID id)
 {
-    if (_rx_buffer.size() == 10 && _rx_buffer[9] == calc_crc8(_rx_buffer.data(), 9))
+    if (_rx_buffer.size() == 10 && _rx_buffer[9] == calc_crc8(std::span(_rx_buffer).first(9)))
     {
         if (id == MotorBusID::left && static_cast<MotorBusID>(_rx_buffer[0]) == MotorBusID::left)
         {
@@ -333,25 +330,21 @@ void MotionClass::speed_set_rx_data_process(MotorBusID id)
         if (id == MotorBusID::left)
         {
             esplog::warn("left motor communication error.");
-            if (_left_motor_communication_error_count < 2)
+            _left_motor_communication_error_count++;
+            if (_left_motor_communication_error_count == 3)
             {
-                _left_motor_communication_error_count++;
-            }
-            else
-            {
-                _left_motor_communication_error = true;
+              _left_motor_communication_error_count = 0;
+              _left_motor_communication_error = true;
             }
         }
         else if (id == MotorBusID::right)
         {
             esplog::warn("right motor communication error.");
-            if (_right_motor_communication_error_count < 2)
+            _right_motor_communication_error_count++;
+            if (_right_motor_communication_error_count == 3)
             {
-                _right_motor_communication_error_count++;
-            }
-            else
-            {
-                _right_motor_communication_error = true;
+              _right_motor_communication_error_count = 0;
+              _right_motor_communication_error = true;
             }
         }
     }
@@ -453,101 +446,101 @@ std::pair<int16_t, int16_t> MotionClass::speed_convert_rpm(float linear, float a
 
 void MotionClass::motion_task(void *arg)
 {
-    auto m = static_cast<MotionClass *>(arg);
-    std::unique_lock<std::mutex> lock(m->_mutex);
+    auto self = static_cast<MotionClass *>(arg);
+    std::unique_lock<std::mutex> lock(self->_mutex);
     esp_task_wdt_add(nullptr);
     while (1)
     {
         esp_task_wdt_reset();
-        if (!m->_is_ready)
+        if (!self->_is_ready)
         {
             // 必须先使能再设置驱动模式
-            if (m->_left_motor_state != State::enable)
+            if (self->_left_motor_state != State::enable)
             {
                 motor_enable(MotorBusID::left);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetEnable);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetEnable);
             }
-            else if (m->_left_motor_mode != DriveMode::speed)
+            else if (self->_left_motor_mode != DriveMode::speed)
             {
                 motor_set_drive_mode(MotorBusID::left, ModeCmd::SetSpeedMode);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetSpeedMode);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetSpeedMode);
             }
-            else if (m->_left_motor_disconnect_stop != true)
+            else if (self->_left_motor_disconnect_stop != true)
             {
                 motor_set_disconnect_stop(MotorBusID::left);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::EnableDisConnectStop);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::EnableDisConnectStop);
             }
-            else if (!m->_left_motor_pid_set)
+            else if (!self->_left_motor_pid_set)
             {
                 motor_set_pid(MotorBusID::left);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetPID);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetPID);
             }
 
             // 必须先使能再设置驱动模式
-            if (m->_right_motor_state != State::enable)
+            if (self->_right_motor_state != State::enable)
             {
                 motor_enable(MotorBusID::right);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetEnable);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetEnable);
             }
-            else if (m->_right_motor_mode != DriveMode::speed)
+            else if (self->_right_motor_mode != DriveMode::speed)
             {
                 motor_set_drive_mode(MotorBusID::right, ModeCmd::SetSpeedMode);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetSpeedMode);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetSpeedMode);
             }
-            else if (m->_right_motor_disconnect_stop != true)
+            else if (self->_right_motor_disconnect_stop != true)
             {
                 motor_set_disconnect_stop(MotorBusID::right);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::EnableDisConnectStop);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::EnableDisConnectStop);
             }
-            else if (!m->_right_motor_pid_set)
+            else if (!self->_right_motor_pid_set)
             {
                 motor_set_pid(MotorBusID::right);
-                m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-                m->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetPID);
+                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetPID);
             }
 
-            if (m->_left_motor_state == State::enable && m->_left_motor_mode == DriveMode::speed &&
-                m->_left_motor_disconnect_stop == true && m->_left_motor_pid_set == true &&
-                m->_right_motor_state == State::enable && m->_right_motor_mode == DriveMode::speed &&
-                m->_right_motor_disconnect_stop == true && m->_right_motor_pid_set == true)
+            if (self->_left_motor_state == State::enable && self->_left_motor_mode == DriveMode::speed &&
+                self->_left_motor_disconnect_stop == true && self->_left_motor_pid_set == true &&
+                self->_right_motor_state == State::enable && self->_right_motor_mode == DriveMode::speed &&
+                self->_right_motor_disconnect_stop == true && self->_right_motor_pid_set == true)
             {
-                m->_is_ready = true;
-                m->_last_plan_time = millis();
+                self->_is_ready = true;
+                self->_last_plan_time = millis();
             }
         }
         else
         {
-            uint32_t interval = millis() - m->_last_plan_time;
+            uint32_t interval = millis() - self->_last_plan_time;
             if (interval > 100)
             {
                 float linear =
-                    velocity_planning(m->_linear_speed_cur, m->_linear_speed_set, m->_linear_speed_acc, interval);
+                    velocity_planning(self->_linear_speed_cur, self->_linear_speed_set, self->_linear_speed_acc, interval);
                 float angular =
-                    velocity_planning(m->_angular_speed_cur, m->_angular_speed_set, m->_angular_speed_acc, interval);
+                    velocity_planning(self->_angular_speed_cur, self->_angular_speed_set, self->_angular_speed_acc, interval);
                 // float linear = m->_linear_speed_set;
                 // float angular = m->_angular_speed_set;
                 auto [left_motor_rpm, right_motor_rpm] = speed_convert_rpm(linear, angular);
-                m->_linear_speed_cur = linear;
-                m->_angular_speed_cur = angular;
-                m->_left_motor_rpm = left_motor_rpm;
-                m->_right_motor_rpm = right_motor_rpm;
-                m->_last_plan_time = millis();
+                self->_linear_speed_cur = linear;
+                self->_angular_speed_cur = angular;
+                self->_left_motor_rpm = left_motor_rpm;
+                self->_right_motor_rpm = right_motor_rpm;
+                self->_last_plan_time = millis();
             }
 
-            motor_set_speed(MotionClass::MotorBusID::left, m->_left_motor_rpm);
-            m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-            m->speed_set_rx_data_process(MotionClass::MotorBusID::left);
+            motor_set_speed(MotionClass::MotorBusID::left, self->_left_motor_rpm);
+            self->_condition.wait_for(lock, std::chrono::milliseconds(30));
+            self->speed_set_rx_data_process(MotionClass::MotorBusID::left);
             vTaskDelay(pdMS_TO_TICKS(5));
-            motor_set_speed(MotionClass::MotorBusID::right, m->_right_motor_rpm);
-            m->_condition.wait_for(lock, std::chrono::milliseconds(300));
-            m->speed_set_rx_data_process(MotionClass::MotorBusID::right);
+            motor_set_speed(MotionClass::MotorBusID::right, self->_right_motor_rpm);
+            self->_condition.wait_for(lock, std::chrono::milliseconds(30));
+            self->speed_set_rx_data_process(MotionClass::MotorBusID::right);
             vTaskDelay(pdMS_TO_TICKS(5));
         }
     }

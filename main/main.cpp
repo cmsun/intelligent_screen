@@ -4,6 +4,7 @@
 #include "micro_ros.hpp"
 #include "motion.hpp"
 #include "mpu9250.hpp"
+#include "setup_motor_id.hpp"
 #include "xl9535.hpp"
 
 #include <esp_task_wdt.h>
@@ -78,20 +79,23 @@ extern "C" void app_main(void) {
   // };
   // esp_task_wdt_init(&wdt_cfg);
 
+  // 设置电机控制板的ID
+  // SetupMotorID.begin(2);
   // 底盘电机控制（UART1 驱动电机控制板）
-  // Motion.begin();
-  // esplog::info("Motion initialized");
+  Motion.begin();
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  Motion.set_chassis_speed(10.0f, 0.0f);
 
   // XL9535 GPIO 扩展：风扇输出、地面检测输入、抬头/低头限位输入
   // begin 内部完成 I2C 初始化、方向配置并创建轮询任务
-  if (!Xl9535.begin())
-  {
-    esplog::error("XL9535 init failed");
-  }
-  else
-  {
-    xTaskCreate(fan_test_task, "fan_test", 1024 * 5, nullptr, 4, nullptr);
-  }
+  // if (!Xl9535.begin())
+  // {
+  //   esplog::error("XL9535 init failed");
+  // }
+  // else
+  // {
+  //   xTaskCreate(fan_test_task, "fan_test", 1024 * 5, nullptr, 4, nullptr);
+  // }
 
   // IMU 初始化并启动采样线程（begin 内部创建采样线程）
   // Imu.begin();

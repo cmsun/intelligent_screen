@@ -259,11 +259,11 @@ void MPU9250::sample_task(void *arg) {
       const ImuSample &ls = self->last_sample();
       const Vec3 e = self->euler_deg();
       esplog::debug("accel={:.2f},{:.2f},{:.2f} gyro={:.2f},{:.2f},{:.2f} "
-                   "mag={:.2f},{:.2f},{:.2f} "
-                   "temp={:.2f} | roll={:.1f} pitch={:.1f} yaw={:.1f}",
-                   ls.accel.x, ls.accel.y, ls.accel.z, ls.gyro.x, ls.gyro.y,
-                   ls.gyro.z, ls.mag.x, ls.mag.y, ls.mag.z, ls.temperature, e.x,
-                   e.y, e.z);
+                    "mag={:.2f},{:.2f},{:.2f} "
+                    "temp={:.2f} | roll={:.1f} pitch={:.1f} yaw={:.1f}",
+                    ls.accel.x, ls.accel.y, ls.accel.z, ls.gyro.x, ls.gyro.y,
+                    ls.gyro.z, ls.mag.x, ls.mag.y, ls.mag.z, ls.temperature, e.x,
+                    e.y, e.z);
     }
 
     vTaskDelay(pdMS_TO_TICKS(5)); // ~200 Hz 循环

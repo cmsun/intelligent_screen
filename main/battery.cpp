@@ -157,9 +157,9 @@ void BatteryClass::battery_task(void *arg)
 
 void BatteryClass::log_status(void)
 {
-    esplog::info("battery {:.2f}V, charger {:.2f}V, current {:+.2f}A, power {:+.1f}W, soc {:.1f}%, charge_en {}, state {}",
-                 _status.battery_voltage, _status.charger_voltage, _status.current,
-                 _status.power, _status.soc, _status.charge_enabled ? "on" : "off", _status.state);
+    esplog::debug("battery {:.2f}V, charger {:.2f}V, current {:+.2f}A, power {:+.1f}W, soc {:.1f}%, charge_en {}, state {}",
+                  _status.battery_voltage, _status.charger_voltage, _status.current,
+                  _status.power, _status.soc, _status.charge_enabled ? "on" : "off", _status.state);
 }
 
 // 读取一次 ADC 并换算为毫伏，失败返回 false
