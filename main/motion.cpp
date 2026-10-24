@@ -130,9 +130,9 @@ void MotionClass::power_on(void)
 
 void MotionClass::uart_rx_task(void *arg)
 {
-    auto *m = static_cast<MotionClass *>(arg);
     uart_event_t event;
-    while (xQueueReceive(m->_uart_queue, &event, portMAX_DELAY))
+    auto *self = static_cast<MotionClass *>(arg);
+    while (xQueueReceive(self->_uart_queue, &event, portMAX_DELAY))
     {
         if (event.type != UART_DATA)
         {
@@ -141,10 +141,10 @@ void MotionClass::uart_rx_task(void *arg)
         uint8_t byte = 0;
         while (uart_read_bytes(kMotorUart, &byte, 1, 0) > 0)
         {
-            m->_rx_buffer.emplace_back(byte);
+            self->_rx_buffer.emplace_back(byte);
         }
-        esplog::debug("motor rx: {:02X}", fmt::join(m->_rx_buffer, " "));
-        m->_condition.notify_one();
+        esplog::debug("motor rx: {:02X}", fmt::join(self->_rx_buffer, " "));
+        self->_condition.notify_one();
     }
 }
 
@@ -311,7 +311,9 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
 
 void MotionClass::speed_set_rx_data_process(MotorBusID id)
 {
-    if (_rx_buffer.size() == 10 && _rx_buffer[9] == calc_crc8(std::span(_rx_buffer).first(9)))
+    if (_rx_buffer.size() == 10 &&
+        _rx_buffer[1] == 0x65 &&
+        _rx_buffer[9] == calc_crc8(std::span(_rx_buffer).first(9)))
     {
         if (id == MotorBusID::left && static_cast<MotorBusID>(_rx_buffer[0]) == MotorBusID::left)
         {
