@@ -1,5 +1,6 @@
 #include "mpu9250.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <numbers>
@@ -122,11 +123,15 @@ void Madgwick::update(const Vec3 &accel, const Vec3 &gyro, const Vec3 &mag,
   }
 
   // ---- 磁力计校正：磁力计无效时跳过，不影响上面的加速度计项 ----
-  // 目标函数：把实测磁场旋到地理系得到 h，希望其水平分量落在地理 +X 轴上
-  // （即 hy → 0）。利用四元数旋转保范性，残差可等价写成
-  //   F = ½·|f_b|² = r·(r − hx)，  r = hypot(hx, hy)
-  // 直接对 (hx, hy) 求梯度再链式法则展开，避免引用 J_b 闭式时把
-  // 参考磁场 b 当作常数（那样梯度与真实梯度相差 10%~170%）。
+  // 把实测磁场旋到地理系得 h = (hx, hy, hz)，航向误差就是 atan2(-hy, hx)
+  // （h 的水平分量应落在地理 +X 上）。直接绕【地理 Z 轴】转过这个角度来修正。
+  //
+  // 这里不用 Madgwick 的梯度式 f_b：那个目标函数 F = ½|f_b|² = r·(r − hx)
+  // 只在"hy = 0"处为零，而 hy = 0 既可以靠 yaw 达成、也可以靠倾斜达成
+  // （例如滚转 atan(Bh/Bz) 也能让 hy 归零）。结果是航向误差会耦合进倾斜，
+  // 被加速度计项拽住，beta_mag 调大很快就饱和（离线实测：90° 误差
+  // beta_mag 0.6→3→6 只从 2.54s 缩到 1.62→1.49s）。
+  // 直接修正航向则与倾斜解耦，收敛时间常数就是 1/beta_mag。
   float mx = mag.x, my = mag.y, mz = mag.z;
   const float mNorm = std::sqrt(mx * mx + my * my + mz * mz);
   if (mNorm > 1e-6f) {
@@ -134,31 +139,24 @@ void Madgwick::update(const Vec3 &accel, const Vec3 &gyro, const Vec3 &mag,
     my /= mNorm;
     mz /= mNorm;
 
-    // h = Rᵀ(q)·m（机体系 -> 地理系）
+    // h = Rᵀ(q)·m（机体系 -> 地理系），已按当前姿态做了倾斜补偿
     const float hx = (1.0f - 2.0f * (q2 * q2 + q3 * q3)) * mx +
                      2.0f * (q1 * q2 - q0 * q3) * my +
                      2.0f * (q1 * q3 + q0 * q2) * mz;
     const float hy = 2.0f * (q1 * q2 + q0 * q3) * mx +
                      (1.0f - 2.0f * (q1 * q1 + q3 * q3)) * my +
                      2.0f * (q2 * q3 - q0 * q1) * mz;
-    const float r = std::sqrt(hx * hx + hy * hy);
-    if (r > 1e-6f) {
-      const float dFx = 2.0f * hx - hx * hx / r - r; // ∂F/∂hx
-      const float dFy = 2.0f * hy - hx * hy / r;     // ∂F/∂hy
-
-      const float dhx0 = -2.0f * q3 * my + 2.0f * q2 * mz;
-      const float dhx1 = 2.0f * q2 * my + 2.0f * q3 * mz;
-      const float dhx2 = -4.0f * q2 * mx + 2.0f * q1 * my + 2.0f * q0 * mz;
-      const float dhx3 = -4.0f * q3 * mx - 2.0f * q0 * my + 2.0f * q1 * mz;
-      const float dhy0 = 2.0f * q3 * mx - 2.0f * q1 * mz;
-      const float dhy1 = 2.0f * q2 * mx - 4.0f * q1 * my - 2.0f * q0 * mz;
-      const float dhy2 = 2.0f * q1 * mx + 2.0f * q3 * mz;
-      const float dhy3 = 2.0f * q0 * mx - 4.0f * q3 * my + 2.0f * q2 * mz;
-
-      qDot0 -= _beta * (dFx * dhx0 + dFy * dhy0);
-      qDot1 -= _beta * (dFx * dhx1 + dFy * dhy1);
-      qDot2 -= _beta * (dFx * dhx2 + dFy * dhy2);
-      qDot3 -= _beta * (dFx * dhx3 + dFy * dhy3);
+    const float r = std::sqrt(hx * hx + hy * hy); // 水平分量强度
+    if (r > 1e-3f) {
+      // yawErr > 0 表示估计航向需要再转 +yawErr 才与磁北一致
+      const float yawErr = std::atan2(-hy, hx);
+      const float w = 0.5f * _beta_mag * yawErr; // ½·角速度 [rad/s]
+      // 航向误差是地理系 Z 轴上的量，须【左乘】（地理系旋转）：
+      // qDot += (0,0,0,w) ⊗ q = w·(-q3, -q2, q1, q0)
+      qDot0 -= w * q3;
+      qDot1 -= w * q2;
+      qDot2 += w * q1;
+      qDot3 += w * q0;
     }
   }
 
@@ -196,6 +194,7 @@ MPU9250::~MPU9250() {
 void MPU9250::begin(void) {
   // 按配置项设置融合增益
   _fusion.set_beta(_cfg.beta);
+  _fusion.set_beta_mag(_cfg.beta_mag);
 
   if (auto err = init(); err != ESP_OK) {
     esplog::error("MPU-9250 init failed: {}", esp_err_to_name(err));
@@ -209,6 +208,11 @@ void MPU9250::begin(void) {
     request_gyro_calibration();
   } else {
     _gyro_calib.done = true; // 不标定，直接使用配置里的零偏
+  }
+
+  // 磁力计硬磁标定需要人工翻动板子，默认只在显式开启时才上电自动跑
+  if (_cfg.mag_calib_on_boot) {
+    start_mag_calibration();
   }
 
   // 创建采样线程（~200 Hz 读取 + 融合 + 低频日志）
@@ -419,15 +423,16 @@ esp_err_t MPU9250::read_raw(ImuSample &out) noexcept {
   if (e4 != ESP_OK)
     return e4;
 
-  out.accel.x =
-      _cfg.accel_sign.x * to_int16(abuf[0], abuf[1]) * ACCEL_SCALE * G_TO_MS2 -
-      _cfg.accel_bias_m_s2.x;
-  out.accel.y =
-      _cfg.accel_sign.y * to_int16(abuf[2], abuf[3]) * ACCEL_SCALE * G_TO_MS2 -
-      _cfg.accel_bias_m_s2.y;
-  out.accel.z =
-      _cfg.accel_sign.z * to_int16(abuf[4], abuf[5]) * ACCEL_SCALE * G_TO_MS2 -
-      _cfg.accel_bias_m_s2.z;
+  // 加速度计：尺度修正 -> 符号校正 -> 减零偏
+  out.accel.x = _cfg.accel_scale.x * _cfg.accel_sign.x *
+                    to_int16(abuf[0], abuf[1]) * ACCEL_SCALE * G_TO_MS2 -
+                _cfg.accel_bias_m_s2.x;
+  out.accel.y = _cfg.accel_scale.y * _cfg.accel_sign.y *
+                    to_int16(abuf[2], abuf[3]) * ACCEL_SCALE * G_TO_MS2 -
+                _cfg.accel_bias_m_s2.y;
+  out.accel.z = _cfg.accel_scale.z * _cfg.accel_sign.z *
+                    to_int16(abuf[4], abuf[5]) * ACCEL_SCALE * G_TO_MS2 -
+                _cfg.accel_bias_m_s2.z;
 
   // 陀螺仪：先取符号校正后、尚未减零偏的原始值，喂给零偏标定器
   const Vec3 gyro_raw{
@@ -452,6 +457,8 @@ esp_err_t MPU9250::read_raw(ImuSample &out) noexcept {
     mraw.z = to_int16(mbuf[6], mbuf[5]) * AK8963_UT_PER_LSB * _mag_asa[2];
     // 将 AK8963 轴对齐到加速度计坐标系（默认交换 X/Y 并取反 Z）
     Vec3 m = _cfg.mag_swap_xy ? Vec3{mraw.y, mraw.x, -mraw.z} : mraw;
+    // 硬磁标定采集的是"对齐后、未减偏置"的原始值
+    mag_calib_feed(m, static_cast<uint32_t>(esp_timer_get_time() / 1000));
     // 减去硬磁偏置（使读数关于 0 对称），再应用符号校正
     _last_mag = {(m.x - _cfg.mag_offset_ut.x) * _cfg.mag_sign.x,
                  (m.y - _cfg.mag_offset_ut.y) * _cfg.mag_sign.y,
@@ -467,6 +474,63 @@ void MPU9250::request_gyro_calibration() noexcept {
   _gyro_calib.started = true;
   _gyro_calib.start_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
   esplog::info("gyro bias calibration pending, keep the board still...");
+}
+
+void MPU9250::start_mag_calibration() noexcept {
+  _mag_calib = MagCalib{};
+  _mag_calib.active = true;
+  _mag_calib.start_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+  esplog::warn("磁力计硬磁标定开始：请在 {} s 内【持续缓慢翻动板子】，"
+               "让 X/Y/Z 三轴都扫到正负两极（画 8 字 + 各方向翻转）",
+               static_cast<unsigned>(_cfg.mag_calib_duration_ms / 1000));
+  esplog::warn("标定期间磁力计融合会临时关闭，结束后自动恢复");
+}
+
+void MPU9250::mag_calib_feed(const Vec3 &mag_aligned, uint32_t now_ms) noexcept {
+  auto &c = _mag_calib;
+  if (!c.active)
+    return;
+
+  if (!c.primed) {
+    c.min = mag_aligned;
+    c.max = mag_aligned;
+    c.primed = true;
+  } else {
+    c.min.x = std::min(c.min.x, mag_aligned.x);
+    c.min.y = std::min(c.min.y, mag_aligned.y);
+    c.min.z = std::min(c.min.z, mag_aligned.z);
+    c.max.x = std::max(c.max.x, mag_aligned.x);
+    c.max.y = std::max(c.max.y, mag_aligned.y);
+    c.max.z = std::max(c.max.z, mag_aligned.z);
+  }
+
+  if (now_ms - c.start_ms < _cfg.mag_calib_duration_ms)
+    return;
+
+  // 采集结束：offset = (max + min) / 2；峰峰值太小的轴视为没转够，保留旧值
+  const float range[3] = {c.max.x - c.min.x, c.max.y - c.min.y,
+                          c.max.z - c.min.z};
+  const float mid[3] = {(c.max.x + c.min.x) * 0.5f, (c.max.y + c.min.y) * 0.5f,
+                        (c.max.z + c.min.z) * 0.5f};
+  const float old[3] = {_cfg.mag_offset_ut.x, _cfg.mag_offset_ut.y,
+                        _cfg.mag_offset_ut.z};
+  float next[3];
+  for (int i = 0; i < 3; ++i)
+    next[i] = (range[i] >= _cfg.mag_calib_min_range_ut) ? mid[i] : old[i];
+  _cfg.mag_offset_ut = {next[0], next[1], next[2]};
+  c.active = false;
+  c.done = true;
+  _fusion.reset(); // 航向参考变了，重新起算
+
+  const float radius = (range[0] + range[1] + range[2]) / 6.0f;
+  esplog::warn("磁力计硬磁标定完成 -> mag_offset_ut = {{{:.2f}, {:.2f}, {:.2f}}}",
+               _cfg.mag_offset_ut.x, _cfg.mag_offset_ut.y,
+               _cfg.mag_offset_ut.z);
+  esplog::warn("  峰峰值 X={:.1f} Y={:.1f} Z={:.1f} uT（<{:.0f} 的轴沿用旧值）",
+               range[0], range[1], range[2], _cfg.mag_calib_min_range_ut);
+  esplog::warn("  地磁场强度约 {:.1f} uT（中国大部 45~55）；"
+               "把这个 offset 回填到 mpu9250.hpp 后记得把 mag_calib_on_boot 置回 false",
+               radius);
 }
 
 void MPU9250::gyro_calib_feed(const Vec3 &gyro_raw, float accel_norm) noexcept {
@@ -529,15 +593,19 @@ Vec3 MPU9250::euler_deg() const noexcept {
   // 应用静态零偏校准（roll/pitch 基准偏移）
   e.x -= _cfg.roll_offset_deg;
   e.y -= _cfg.pitch_offset_deg;
+  // yaw 归一到 [0, 360)：atan2 原始输出是 (-180, 180]，取两次 fmod 可同时
+  // 处理负角与 -0.0（避免出现 "-0.0"）
+  e.z = std::fmod(std::fmod(e.z, 360.0f) + 360.0f, 360.0f);
   return e;
 }
 
 esp_err_t MPU9250::read(ImuSample &out, float dt) noexcept {
   esp_err_t err = read_raw(out);
   if (err == ESP_OK && dt > 0.0f) {
-    // 未启用磁力计融合时传入零磁力计：update 内只会跳过磁力计校正项，
-    // 加速度计校正照常生效（两者互不影响）
-    const Vec3 mag = _cfg.mag_fusion_enabled ? out.mag : Vec3{0.0f, 0.0f, 0.0f};
+    // 三种情况传零磁力计：未启用融合、正在做硬磁标定（避免脏数据污染航向）。
+    // update 内只会跳过磁力计校正项，加速度计校正照常生效（两者互不影响）
+    const bool use_mag = _cfg.mag_fusion_enabled && !_mag_calib.active;
+    const Vec3 mag = use_mag ? out.mag : Vec3{0.0f, 0.0f, 0.0f};
     _fusion.update(out.accel, out.gyro, mag, dt);
   }
   return err;
