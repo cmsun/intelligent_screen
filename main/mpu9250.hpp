@@ -95,7 +95,18 @@ public:
 
     // 陀螺仪零偏校准（单位：rad/s）。静止时测得的 gyro 输出即为零偏，
     // 读取时减去，消除长时间积分导致的 yaw 漂移。
+    // 开启 gyro_auto_calib_enabled 后，该值会被自动标定结果覆盖。
     Vec3 gyro_bias_rad_s{-0.035f, -0.005f, -0.005f};
+
+    // ---- 陀螺仪零偏自动标定（上电/被调用后检测到静止即采样求均值）----
+    // 标定要求板子保持不动：任一轴角速度超阈值、或加速度模值抖动超阈值，
+    // 都会丢弃已累积的样本重新计数，因此板子动来动去时永远不会标定成功。
+    bool gyro_auto_calib_enabled = true;
+    uint32_t gyro_calib_samples = 400;     // 采样点数（200Hz 下约 2s）
+    uint32_t gyro_calib_warmup_ms = 1000;  // 上电后等待传感器/滤波器稳定
+    float gyro_calib_gyro_thresh = 0.05f;  // rad/s，约 2.9°/s
+    float gyro_calib_accel_thresh = 0.30f; // m/s²
+
 
     // 加速度计零偏校准（单位：m/s^2）。静止水平放置时，理想输出应为
     // (0, 0, ±g)，实测的 X/Y 非零值即为零偏，读取时减去。
@@ -118,6 +129,21 @@ public:
 
   /// 初始化完成且采样线程已启动。
   [[nodiscard]] bool is_ready() const noexcept { return _inited; }
+
+  /// 重新触发一次陀螺仪零偏标定：丢弃已累积样本，在下一次检测到静止后重新采集。
+  /// 调用后请把板子放稳不动，日志会打印标定结果。
+  void request_gyro_calibration() noexcept;
+
+  /// 陀螺仪零偏标定是否已完成（false 表示还在等静止或正在采集）。
+  [[nodiscard]] bool gyro_calibrated() const noexcept {
+    return _gyro_calib.done;
+  }
+
+  /// 当前生效的陀螺仪零偏 [rad/s]（自动标定完成后会被更新）。
+  [[nodiscard]] Vec3 gyro_bias_rad_s() const noexcept {
+    return _cfg.gyro_bias_rad_s;
+  }
+
 
   /// 配置项（可在 begin 之前修改，begin 之后不再生效）。
   Config _cfg; // 保持与 motion 风格一致，直接公开可改
@@ -147,8 +173,21 @@ private:
   /// 读取传感器并立即执行一次融合；dt 为距上次更新的时间间隔 [s]。
   [[nodiscard]] esp_err_t read(ImuSample &out, float dt) noexcept;
 
+  /// 静止检测 + 陀螺仪零偏累积，由 read_raw 每个采样周期调用。
+  void gyro_calib_feed(const Vec3 &gyro_raw, float accel_norm) noexcept;
+
   /// 采样线程：高频读取 + 融合 + 低频日志。
   static void sample_task(void *arg);
+
+  struct GyroCalib {
+    bool started = false;   // 已记录起始时刻（用于上电预热）
+    bool done = false;      // 标定完成
+    uint32_t count = 0;     // 本段已累计样本数
+    Vec3 sum{};             // 原始陀螺累加值
+    float accel_ref = 0.0f; // 本段加速度模值基准（用于抖动判定）
+    uint32_t start_ms = 0;  // warmup 起点
+  };
+  GyroCalib _gyro_calib{};
 
   spi_device_handle_t _dev = nullptr;
   Madgwick _fusion;

@@ -94,90 +94,71 @@ void Madgwick::update(const Vec3 &accel, const Vec3 &gyro, const Vec3 &mag,
   float qDot2 = 0.5f * (q0 * gyro.y - q1 * gyro.z + q3 * gyro.x);
   float qDot3 = 0.5f * (q0 * gyro.z + q1 * gyro.y - q2 * gyro.x);
 
+  // ---- 加速度计校正：只要加速度计有效就参与，不受磁力计开关影响 ----
+  // 注意：历史上这一项被错误地放在磁力计有效分支内，导致关闭磁力计融合时
+  // 加速度计校正被连带跳过，姿态退化为纯陀螺积分、roll/pitch 随零偏单调漂移。
   float ax = accel.x, ay = accel.y, az = accel.z;
-  float mx = mag.x, my = mag.y, mz = mag.z;
-
-  // 仅在加速度计有效时做梯度校正（避免除零）
   const float aNorm = std::sqrt(ax * ax + ay * ay + az * az);
   if (aNorm > 1e-6f) {
     ax /= aNorm;
     ay /= aNorm;
     az /= aNorm;
 
-    const float mNorm = std::sqrt(mx * mx + my * my + mz * mz);
-    if (mNorm > 1e-6f) {
-      mx /= mNorm;
-      my /= mNorm;
-      mz /= mNorm;
+    // 机体系内"估计的重力方向"与实测值之差
+    const float f1 = 2.0f * (q1 * q3 - q0 * q2) - ax;
+    const float f2 = 2.0f * (q0 * q1 + q2 * q3) - ay;
+    const float f3 = 2.0f * (0.5f - q1 * q1 - q2 * q2) - az;
 
-      const float _2q0 = 2.0f * q0, _2q1 = 2.0f * q1, _2q2 = 2.0f * q2,
-                  _2q3 = 2.0f * q3;
-      const float _2q0mx = 2.0f * q0 * mx, _2q0my = 2.0f * q0 * my,
-                  _2q0mz = 2.0f * q0 * mz;
-      const float _2q1mx = 2.0f * q1 * mx;
-      const float q0q0 = q0 * q0, q1q1 = q1 * q1, q2q2 = q2 * q2,
-                  q3q3 = q3 * q3;
+    // ∇(½·|f|²) = J_gᵀ·f
+    const float g0 = -2.0f * q2 * f1 + 2.0f * q1 * f2;
+    const float g1 = 2.0f * q3 * f1 + 2.0f * q0 * f2 - 4.0f * q1 * f3;
+    const float g2 = -2.0f * q0 * f1 + 2.0f * q3 * f2 - 4.0f * q2 * f3;
+    const float g3 = 2.0f * q1 * f1 + 2.0f * q2 * f2;
 
-      // 地球磁场参考方向
-      const float hx = mx * q0q0 - _2q0my * q3 + _2q0mz * q2 + mx * q1q1 +
-                       _2q1 * my * q2 + _2q1 * mz * q3 - mx * q2q2 - mx * q3q3;
-      const float hy = _2q0mx * q3 + my * q0q0 - _2q0mz * q1 + _2q1mx * q2 -
-                       my * q1q1 + my * q2q2 + _2q2 * mz * q3 - my * q3q3;
-      const float _2bx = std::sqrt(hx * hx + hy * hy);
-      const float _2bz = -_2q0mx * q2 + _2q0my * q1 + mz * q0q0 + _2q1mx * q3 -
-                         mz * q1q1 + _2q2 * my * q3 - mz * q2q2 - mz * q3q3;
-      const float _4bx = 2.0f * _2bx;
-      const float _4bz = 2.0f * _2bz;
+    qDot0 -= _beta * g0;
+    qDot1 -= _beta * g1;
+    qDot2 -= _beta * g2;
+    qDot3 -= _beta * g3;
+  }
 
-      // 梯度下降校正步
-      float s0 =
-          -_2q2 * (2.0f * (q1 * q3 - q0 * q2) - ax) +
-          _2q1 * (2.0f * (q0 * q1 + q2 * q3) - ay) -
-          _2bz * q2 *
-              (_2bx * (0.5f - q2q2 - q3q3) + _2bz * (q1 * q3 - q0 * q2) - mx) +
-          (-_2bx * q3 + _2bz * q1) *
-              (_2bx * (q1 * q2 - q0 * q3) + _2bz * (q2 * q3 - q0 * q1) - my) +
-          _2bx * q2 *
-              (_2bx * (q0 * q2 + q1 * q3) + _2bz * (q1 * q2 - q0 * q3) - mz);
+  // ---- 磁力计校正：磁力计无效时跳过，不影响上面的加速度计项 ----
+  // 目标函数：把实测磁场旋到地理系得到 h，希望其水平分量落在地理 +X 轴上
+  // （即 hy → 0）。利用四元数旋转保范性，残差可等价写成
+  //   F = ½·|f_b|² = r·(r − hx)，  r = hypot(hx, hy)
+  // 直接对 (hx, hy) 求梯度再链式法则展开，避免引用 J_b 闭式时把
+  // 参考磁场 b 当作常数（那样梯度与真实梯度相差 10%~170%）。
+  float mx = mag.x, my = mag.y, mz = mag.z;
+  const float mNorm = std::sqrt(mx * mx + my * my + mz * mz);
+  if (mNorm > 1e-6f) {
+    mx /= mNorm;
+    my /= mNorm;
+    mz /= mNorm;
 
-      float s1 =
-          _2q3 * (2.0f * (q1 * q3 - q0 * q2) - ax) +
-          _2q0 * (2.0f * (q0 * q1 + q2 * q3) - ay) -
-          4.0f * q1 * (2.0f * (0.5f - q1q1 - q2q2) - az) +
-          _2bz * q3 *
-              (_2bx * (0.5f - q2q2 - q3q3) + _2bz * (q1 * q3 - q0 * q2) - mx) +
-          (_2bx * q2 + _2bz * q0) *
-              (_2bx * (q1 * q2 - q0 * q3) + _2bz * (q2 * q3 - q0 * q1) - my) +
-          (_2bx * q3 - _4bz * q1) *
-              (_2bx * (q0 * q2 + q1 * q3) + _2bz * (q1 * q2 - q0 * q3) - mz);
+    // h = Rᵀ(q)·m（机体系 -> 地理系）
+    const float hx = (1.0f - 2.0f * (q2 * q2 + q3 * q3)) * mx +
+                     2.0f * (q1 * q2 - q0 * q3) * my +
+                     2.0f * (q1 * q3 + q0 * q2) * mz;
+    const float hy = 2.0f * (q1 * q2 + q0 * q3) * mx +
+                     (1.0f - 2.0f * (q1 * q1 + q3 * q3)) * my +
+                     2.0f * (q2 * q3 - q0 * q1) * mz;
+    const float r = std::sqrt(hx * hx + hy * hy);
+    if (r > 1e-6f) {
+      const float dFx = 2.0f * hx - hx * hx / r - r; // ∂F/∂hx
+      const float dFy = 2.0f * hy - hx * hy / r;     // ∂F/∂hy
 
-      float s2 =
-          -_2q0 * (2.0f * (q1 * q3 - q0 * q2) - ax) +
-          _2q3 * (2.0f * (q0 * q1 + q2 * q3) - ay) -
-          4.0f * q2 * (2.0f * (0.5f - q1q1 - q2q2) - az) +
-          _2bz * q0 *
-              (_2bx * (0.5f - q2q2 - q3q3) + _2bz * (q1 * q3 - q0 * q2) - mx) +
-          (-_2bx * q1 + _2bz * q3) *
-              (_2bx * (q1 * q2 - q0 * q3) + _2bz * (q2 * q3 - q0 * q1) - my) +
-          (_2bx * q0 - _4bz * q2) *
-              (_2bx * (q0 * q2 + q1 * q3) + _2bz * (q1 * q2 - q0 * q3) - mz);
+      const float dhx0 = -2.0f * q3 * my + 2.0f * q2 * mz;
+      const float dhx1 = 2.0f * q2 * my + 2.0f * q3 * mz;
+      const float dhx2 = -4.0f * q2 * mx + 2.0f * q1 * my + 2.0f * q0 * mz;
+      const float dhx3 = -4.0f * q3 * mx - 2.0f * q0 * my + 2.0f * q1 * mz;
+      const float dhy0 = 2.0f * q3 * mx - 2.0f * q1 * mz;
+      const float dhy1 = 2.0f * q2 * mx - 4.0f * q1 * my - 2.0f * q0 * mz;
+      const float dhy2 = 2.0f * q1 * mx + 2.0f * q3 * mz;
+      const float dhy3 = 2.0f * q0 * mx - 4.0f * q3 * my + 2.0f * q2 * mz;
 
-      float s3 =
-          _2q1 * (2.0f * (q1 * q3 - q0 * q2) - ax) +
-          _2q2 * (2.0f * (q0 * q1 + q2 * q3) - ay) +
-          (-_4bx * q3 + _2bz * q2) *
-              (_2bx * (0.5f - q2q2 - q3q3) + _2bz * (q1 * q3 - q0 * q2) - mx) +
-          (-_2bx * q0 + _2bz * q2) *
-              (_2bx * (q1 * q2 - q0 * q3) + _2bz * (q2 * q3 - q0 * q1) - my) +
-          (_2bx * q1 + _4bz * q3) *
-              (_2bx * (q0 * q2 + q1 * q3) + _2bz * (q1 * q2 - q0 * q3) - mz);
-
-      // 标准 Madgwick：beta 直接乘在原始梯度上，不对 s 归一化。
-      // 归一化会破坏梯度下降的物理意义，导致正确解附近持续抖动、漂移。
-      qDot0 -= _beta * s0;
-      qDot1 -= _beta * s1;
-      qDot2 -= _beta * s2;
-      qDot3 -= _beta * s3;
+      qDot0 -= _beta * (dFx * dhx0 + dFy * dhy0);
+      qDot1 -= _beta * (dFx * dhx1 + dFy * dhy1);
+      qDot2 -= _beta * (dFx * dhx2 + dFy * dhy2);
+      qDot3 -= _beta * (dFx * dhx3 + dFy * dhy3);
     }
   }
 
@@ -221,6 +202,14 @@ void MPU9250::begin(void) {
     return;
   }
   esplog::info("MPU-9250 initialized");
+
+  // 陀螺仪零偏自动标定：上电后等板子静止即采样求均值。
+  // 标定完成前姿态仍会用旧零偏积分，标定结束后会 reset 融合器重新收敛。
+  if (_cfg.gyro_auto_calib_enabled) {
+    request_gyro_calibration();
+  } else {
+    _gyro_calib.done = true; // 不标定，直接使用配置里的零偏
+  }
 
   // 创建采样线程（~200 Hz 读取 + 融合 + 低频日志）
   TaskHandle_t handle = nullptr;
@@ -440,15 +429,18 @@ esp_err_t MPU9250::read_raw(ImuSample &out) noexcept {
       _cfg.accel_sign.z * to_int16(abuf[4], abuf[5]) * ACCEL_SCALE * G_TO_MS2 -
       _cfg.accel_bias_m_s2.z;
 
-  out.gyro.x =
-      _cfg.gyro_sign.x * to_int16(gbuf[0], gbuf[1]) * GYRO_SCALE * RAD_PER_DEG -
-      _cfg.gyro_bias_rad_s.x;
-  out.gyro.y =
-      _cfg.gyro_sign.y * to_int16(gbuf[2], gbuf[3]) * GYRO_SCALE * RAD_PER_DEG -
-      _cfg.gyro_bias_rad_s.y;
-  out.gyro.z =
-      _cfg.gyro_sign.z * to_int16(gbuf[4], gbuf[5]) * GYRO_SCALE * RAD_PER_DEG -
-      _cfg.gyro_bias_rad_s.z;
+  // 陀螺仪：先取符号校正后、尚未减零偏的原始值，喂给零偏标定器
+  const Vec3 gyro_raw{
+      _cfg.gyro_sign.x * to_int16(gbuf[0], gbuf[1]) * GYRO_SCALE * RAD_PER_DEG,
+      _cfg.gyro_sign.y * to_int16(gbuf[2], gbuf[3]) * GYRO_SCALE * RAD_PER_DEG,
+      _cfg.gyro_sign.z * to_int16(gbuf[4], gbuf[5]) * GYRO_SCALE * RAD_PER_DEG};
+  const float accel_norm = std::sqrt(out.accel.x * out.accel.x +
+                                     out.accel.y * out.accel.y +
+                                     out.accel.z * out.accel.z);
+  gyro_calib_feed(gyro_raw, accel_norm);
+  out.gyro = {gyro_raw.x - _cfg.gyro_bias_rad_s.x,
+              gyro_raw.y - _cfg.gyro_bias_rad_s.y,
+              gyro_raw.z - _cfg.gyro_bias_rad_s.z};
 
   out.temperature = to_int16(tbuf[0], tbuf[1]) / 333.87f + 21.0f;
 
@@ -470,6 +462,68 @@ esp_err_t MPU9250::read_raw(ImuSample &out) noexcept {
   return ESP_OK;
 }
 
+void MPU9250::request_gyro_calibration() noexcept {
+  _gyro_calib = GyroCalib{};
+  _gyro_calib.started = true;
+  _gyro_calib.start_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+  esplog::info("gyro bias calibration pending, keep the board still...");
+}
+
+void MPU9250::gyro_calib_feed(const Vec3 &gyro_raw, float accel_norm) noexcept {
+  auto &c = _gyro_calib;
+  if (c.done || !_cfg.gyro_auto_calib_enabled)
+    return;
+
+  const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+  if (!c.started) {
+    c.started = true;
+    c.start_ms = now;
+    return;
+  }
+  // 上电预热：等陀螺/加速度 DLPF 与 PLL 稳定后再开始采样
+  if (now - c.start_ms < _cfg.gyro_calib_warmup_ms)
+    return;
+
+  // 静止判据 1：三轴角速度都在阈值内
+  const bool still = std::fabs(gyro_raw.x) < _cfg.gyro_calib_gyro_thresh &&
+                     std::fabs(gyro_raw.y) < _cfg.gyro_calib_gyro_thresh &&
+                     std::fabs(gyro_raw.z) < _cfg.gyro_calib_gyro_thresh;
+  // 静止判据 2：加速度模值相对本段基准没有明显抖动
+  if (!still) {
+    c.count = 0;
+    c.sum = {};
+    return;
+  }
+  if (c.count == 0) {
+    c.accel_ref = accel_norm;
+  } else if (std::fabs(accel_norm - c.accel_ref) >
+             _cfg.gyro_calib_accel_thresh) {
+    c.count = 0;
+    c.sum = {};
+    return;
+  }
+
+  c.sum.x += gyro_raw.x;
+  c.sum.y += gyro_raw.y;
+  c.sum.z += gyro_raw.z;
+  ++c.count;
+
+  if (c.count >= _cfg.gyro_calib_samples) {
+    const float inv = 1.0f / static_cast<float>(c.count);
+    _cfg.gyro_bias_rad_s = {c.sum.x * inv, c.sum.y * inv, c.sum.z * inv};
+    c.done = true;
+    // 零偏变了，让姿态从当前姿态重新起算（加速度计会在 ~1/beta 秒内收敛）
+    _fusion.reset();
+    esplog::info("gyro bias calibrated: {:.5f},{:.5f},{:.5f} rad/s "
+                 "({:.4f},{:.4f},{:.4f} deg/s, {} samples)",
+                 _cfg.gyro_bias_rad_s.x, _cfg.gyro_bias_rad_s.y,
+                 _cfg.gyro_bias_rad_s.z, _cfg.gyro_bias_rad_s.x * 57.29578f,
+                 _cfg.gyro_bias_rad_s.y * 57.29578f,
+                 _cfg.gyro_bias_rad_s.z * 57.29578f,
+                 static_cast<unsigned>(c.count));
+  }
+}
+
 Vec3 MPU9250::euler_deg() const noexcept {
   Vec3 e = _fusion.euler_deg();
   // 应用静态零偏校准（roll/pitch 基准偏移）
@@ -481,7 +535,8 @@ Vec3 MPU9250::euler_deg() const noexcept {
 esp_err_t MPU9250::read(ImuSample &out, float dt) noexcept {
   esp_err_t err = read_raw(out);
   if (err == ESP_OK && dt > 0.0f) {
-    // 未启用磁力计融合时，传入零磁力计（update 内 mNorm<阈值 会跳过磁力计项）
+    // 未启用磁力计融合时传入零磁力计：update 内只会跳过磁力计校正项，
+    // 加速度计校正照常生效（两者互不影响）
     const Vec3 mag = _cfg.mag_fusion_enabled ? out.mag : Vec3{0.0f, 0.0f, 0.0f};
     _fusion.update(out.accel, out.gyro, mag, dt);
   }
