@@ -80,11 +80,11 @@ extern "C" void app_main(void) {
   // esp_task_wdt_init(&wdt_cfg);
 
   // 设置电机控制板的ID
-  // SetupMotorID.begin(2);
+  // SetupMotorID.begin(1);
   // 底盘电机控制（UART1 驱动电机控制板）
-  Motion.begin();
-  vTaskDelay(pdMS_TO_TICKS(1000));
-  Motion.set_chassis_speed(10.0f, 0.0f);
+  // Motion.begin();
+  // vTaskDelay(pdMS_TO_TICKS(1000));
+  // Motion.set_chassis_speed(3.0f, 3.0f);
 
   // XL9535 GPIO 扩展：风扇输出、地面检测输入、抬头/低头限位输入
   // begin 内部完成 I2C 初始化、方向配置并创建轮询任务
@@ -98,8 +98,7 @@ extern "C" void app_main(void) {
   // }
 
   // IMU 初始化并启动采样线程（begin 内部创建采样线程）
-  // Imu.begin();
-  // esplog::info("Imu initialized");
+  Imu.begin();
 
   // 电池管理：begin 内部完成 ADC 初始化、用电压初始化 SOC，并创建周期采样任务
   // if (!Battery.begin())
