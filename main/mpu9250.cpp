@@ -423,29 +423,31 @@ esp_err_t MPU9250::read_raw(ImuSample &out) noexcept {
   if (e4 != ESP_OK)
     return e4;
 
-  // 加速度计：尺度修正 -> 符号校正 -> 减零偏
-  out.accel.x = _cfg.accel_scale.x * _cfg.accel_sign.x *
-                    to_int16(abuf[0], abuf[1]) * ACCEL_SCALE * G_TO_MS2 -
-                _cfg.accel_bias_m_s2.x;
-  out.accel.y = _cfg.accel_scale.y * _cfg.accel_sign.y *
-                    to_int16(abuf[2], abuf[3]) * ACCEL_SCALE * G_TO_MS2 -
-                _cfg.accel_bias_m_s2.y;
-  out.accel.z = _cfg.accel_scale.z * _cfg.accel_sign.z *
-                    to_int16(abuf[4], abuf[5]) * ACCEL_SCALE * G_TO_MS2 -
-                _cfg.accel_bias_m_s2.z;
+  // 加速度计：原始值 -> 物理单位 -> 尺度 -> 减零偏 -> 转到设备框。
+  // 零偏是芯片框下的，必须在乘安装矩阵【之前】减，这样它会被矩阵一起变换。
+  const Vec3 accel_chip{
+      _cfg.accel_scale.x * to_int16(abuf[0], abuf[1]) * ACCEL_SCALE * G_TO_MS2 -
+          _cfg.accel_bias_m_s2.x,
+      _cfg.accel_scale.y * to_int16(abuf[2], abuf[3]) * ACCEL_SCALE * G_TO_MS2 -
+          _cfg.accel_bias_m_s2.y,
+      _cfg.accel_scale.z * to_int16(abuf[4], abuf[5]) * ACCEL_SCALE * G_TO_MS2 -
+          _cfg.accel_bias_m_s2.z};
+  out.accel = mul(_cfg.chip_to_device, accel_chip);
 
-  // 陀螺仪：先取符号校正后、尚未减零偏的原始值，喂给零偏标定器
-  const Vec3 gyro_raw{
-      _cfg.gyro_sign.x * to_int16(gbuf[0], gbuf[1]) * GYRO_SCALE * RAD_PER_DEG,
-      _cfg.gyro_sign.y * to_int16(gbuf[2], gbuf[3]) * GYRO_SCALE * RAD_PER_DEG,
-      _cfg.gyro_sign.z * to_int16(gbuf[4], gbuf[5]) * GYRO_SCALE * RAD_PER_DEG};
+  // 陀螺仪：同样先在芯片框下减零偏，再转设备框。喂给标定器的是芯片框原始值，
+  // 因此自动标定得到的零偏与 gyro_bias_rad_s 处在同一坐标系。
+  const Vec3 gyro_chip{
+      to_int16(gbuf[0], gbuf[1]) * GYRO_SCALE * RAD_PER_DEG,
+      to_int16(gbuf[2], gbuf[3]) * GYRO_SCALE * RAD_PER_DEG,
+      to_int16(gbuf[4], gbuf[5]) * GYRO_SCALE * RAD_PER_DEG};
   const float accel_norm = std::sqrt(out.accel.x * out.accel.x +
                                      out.accel.y * out.accel.y +
                                      out.accel.z * out.accel.z);
-  gyro_calib_feed(gyro_raw, accel_norm);
-  out.gyro = {gyro_raw.x - _cfg.gyro_bias_rad_s.x,
-              gyro_raw.y - _cfg.gyro_bias_rad_s.y,
-              gyro_raw.z - _cfg.gyro_bias_rad_s.z};
+  gyro_calib_feed(gyro_chip, accel_norm);
+  out.gyro = mul(_cfg.chip_to_device,
+                 Vec3{gyro_chip.x - _cfg.gyro_bias_rad_s.x,
+                      gyro_chip.y - _cfg.gyro_bias_rad_s.y,
+                      gyro_chip.z - _cfg.gyro_bias_rad_s.z});
 
   out.temperature = to_int16(tbuf[0], tbuf[1]) / 333.87f + 21.0f;
 
@@ -455,14 +457,16 @@ esp_err_t MPU9250::read_raw(ImuSample &out) noexcept {
     mraw.x = to_int16(mbuf[2], mbuf[1]) * AK8963_UT_PER_LSB * _mag_asa[0];
     mraw.y = to_int16(mbuf[4], mbuf[3]) * AK8963_UT_PER_LSB * _mag_asa[1];
     mraw.z = to_int16(mbuf[6], mbuf[5]) * AK8963_UT_PER_LSB * _mag_asa[2];
-    // 将 AK8963 轴对齐到加速度计坐标系（默认交换 X/Y 并取反 Z）
-    Vec3 m = _cfg.mag_swap_xy ? Vec3{mraw.y, mraw.x, -mraw.z} : mraw;
-    // 硬磁标定采集的是"对齐后、未减偏置"的原始值
-    mag_calib_feed(m, static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    // 减去硬磁偏置（使读数关于 0 对称），再应用符号校正
-    _last_mag = {(m.x - _cfg.mag_offset_ut.x) * _cfg.mag_sign.x,
-                 (m.y - _cfg.mag_offset_ut.y) * _cfg.mag_sign.y,
-                 (m.z - _cfg.mag_offset_ut.z) * _cfg.mag_sign.z};
+    // 硬磁标定采集的是「AK8963 原始框、未减偏置」的读数
+    mag_calib_feed(mraw, static_cast<uint32_t>(esp_timer_get_time() / 1000));
+    // 先在 AK8963 原始框下减硬磁偏置（使读数关于 0 对称），再依次转到芯片框、
+    // 设备框 —— 与 accel/gyro「原始框减零偏 -> 乘安装矩阵」的处理保持一致，
+    // 这样上面两个矩阵以后怎么改都不必再动 mag_offset_ut。
+    _last_mag = mul(_cfg.chip_to_device,
+                    mul(_cfg.mag_frame_to_chip,
+                        Vec3{mraw.x - _cfg.mag_offset_ut.x,
+                             mraw.y - _cfg.mag_offset_ut.y,
+                             mraw.z - _cfg.mag_offset_ut.z}));
   }
   out.mag = _last_mag;
   _last_sample = out;
@@ -486,22 +490,22 @@ void MPU9250::start_mag_calibration() noexcept {
   esplog::warn("标定期间磁力计融合会临时关闭，结束后自动恢复");
 }
 
-void MPU9250::mag_calib_feed(const Vec3 &mag_aligned, uint32_t now_ms) noexcept {
+void MPU9250::mag_calib_feed(const Vec3 &mag_raw, uint32_t now_ms) noexcept {
   auto &c = _mag_calib;
   if (!c.active)
     return;
 
   if (!c.primed) {
-    c.min = mag_aligned;
-    c.max = mag_aligned;
+    c.min = mag_raw;
+    c.max = mag_raw;
     c.primed = true;
   } else {
-    c.min.x = std::min(c.min.x, mag_aligned.x);
-    c.min.y = std::min(c.min.y, mag_aligned.y);
-    c.min.z = std::min(c.min.z, mag_aligned.z);
-    c.max.x = std::max(c.max.x, mag_aligned.x);
-    c.max.y = std::max(c.max.y, mag_aligned.y);
-    c.max.z = std::max(c.max.z, mag_aligned.z);
+    c.min.x = std::min(c.min.x, mag_raw.x);
+    c.min.y = std::min(c.min.y, mag_raw.y);
+    c.min.z = std::min(c.min.z, mag_raw.z);
+    c.max.x = std::max(c.max.x, mag_raw.x);
+    c.max.y = std::max(c.max.y, mag_raw.y);
+    c.max.z = std::max(c.max.z, mag_raw.z);
   }
 
   if (now_ms - c.start_ms < _cfg.mag_calib_duration_ms)
@@ -593,9 +597,22 @@ Vec3 MPU9250::euler_deg() const noexcept {
   // 应用静态零偏校准（roll/pitch 基准偏移）
   e.x -= _cfg.roll_offset_deg;
   e.y -= _cfg.pitch_offset_deg;
-  // yaw 归一到 [0, 360)：atan2 原始输出是 (-180, 180]，取两次 fmod 可同时
+  // pitch 取反：滤波器内部 pitch 是绕设备 +Y（左）轴的右手角，在设备框
+  // （X 前 / Y 左 / Z 上）里 Z→X 即机头下俯，也就是「低头为正」。
+  // 常规 / 航空约定是「抬头为正」，所以输出取反。
+  // roll 不用动：绕 +X 右手是 Y→Z（左翼抬起 = 右滚），与「右滚为正」一致。
+  // 只改显示值，不影响融合器内部四元数；pitch_offset_deg 的填法也不变
+  // （显示 = -(raw - offset)，要归零仍是填滤波器原始输出）。
+  e.y = -e.y;
+  // yaw 取反：滤波器内部 yaw 是绕地理 +Z（向上）的右手角，在设备框
+  // （X 前 / Y 左 / Z 上）里即「左转为正」。常规航向角是罗盘角（北 0 / 东 90 /
+  // 南 180，右转为正），两者方向相反，所以这里取反后再输出：
+  //   设备右转 -> yaw 增大；开启磁力计融合时也就是标准罗盘航向。
+  // 实测佐证（2026-11-03）：静止时 gyro.z 残余 +0.02 rad/s，yaw 单调增大，
+  // 而 gyro.z > 0 正是左转。若确实需要「左转为正」，去掉下面的负号即可。
+  // 归一到 [0, 360)：atan2 原始输出是 (-180, 180]，取两次 fmod 可同时
   // 处理负角与 -0.0（避免出现 "-0.0"）
-  e.z = std::fmod(std::fmod(e.z, 360.0f) + 360.0f, 360.0f);
+  e.z = std::fmod(std::fmod(-e.z, 360.0f) + 360.0f, 360.0f);
   return e;
 }
 

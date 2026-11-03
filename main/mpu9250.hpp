@@ -15,6 +15,19 @@ struct Vec3 {
   float z = 0.0f;
 };
 
+/// 3x3 矩阵（行优先），用于传感器坐标系安装校正：out = M · v
+struct Mat3 {
+  float m[3][3] = {{1.0f, 0.0f, 0.0f},
+                   {0.0f, 1.0f, 0.0f},
+                   {0.0f, 0.0f, 1.0f}};
+};
+
+[[nodiscard]] inline Vec3 mul(const Mat3 &M, const Vec3 &v) noexcept {
+  return {M.m[0][0] * v.x + M.m[0][1] * v.y + M.m[0][2] * v.z,
+          M.m[1][0] * v.x + M.m[1][1] * v.y + M.m[1][2] * v.z,
+          M.m[2][0] * v.x + M.m[2][1] * v.y + M.m[2][2] * v.z};
+}
+
 /// 一次采样的 9 轴原始物理量
 struct ImuSample {
   Vec3 accel{};        // [m/s^2]
@@ -47,7 +60,8 @@ public:
   /// 欧拉角 [rad]：x=roll, y=pitch, z=yaw
   [[nodiscard]] Vec3 euler_rad() const noexcept;
 
-  /// 欧拉角 [deg]：x=roll, y=pitch, z=yaw。yaw 已归一到 [0, 360)。
+  /// 欧拉角 [deg]：x=roll, y=pitch, z=yaw。yaw 归一到 [0, 360)，且已取反为
+  /// 常规罗盘航向（右转为正 / 北0 东90 南180），与滤波器内部的右手角相反。
   [[nodiscard]] Vec3 euler_deg() const noexcept;
 
 private:
@@ -93,20 +107,48 @@ public:
     // 收益很快饱和，建议 3~6。
     float beta_mag = 3.0f;
 
-    // 各轴符号校正（与板卡安装 / 芯片朝向相关，按需翻转 ±1）
-    Vec3 accel_sign{1.0f, 1.0f, -1.0f};
-    Vec3 gyro_sign{1.0f, 1.0f, -1.0f};
-    Vec3 mag_sign{1.0f, 1.0f, 1.0f};
+    // ---- 安装矩阵：芯片框 -> 设备框（X 前 / Y 左 / Z 上）----
+    // 用矩阵而不是「各轴 ±1 符号」，是因为符号只是对角矩阵 diag(±1,±1,±1) 的特例：
+    // 只能翻轴、不能交换轴。本板芯片相对设备是【绕水平 -45° 对角线翻转 180°】，
+    // 即 C_X = -D_Y, C_Y = -D_X, C_Z = -D_Z：
+    //     {{0,-1,0},
+    //      {-1,0,0},  det = +1，是合法旋转（180° 自逆）
+    //      {0,0,-1}}
+    // 2026-11-03 用六面法实测标定确认：正放 / 倒扣 / 前朝天 / 前朝地 / 左朝天 /
+    // 右朝天六个姿态反解出来的就是这个矩阵（还原误差 0~7°，残差来自摆放不够正交）。
+    // ⚠ X/Y 位置上必须是 -1 不能是 +1：填 {{0,1,0},{1,0,0},{0,0,-1}} 同样能消掉
+    // 「roll/pitch 互换」，但 roll 与 pitch 的正负会整体反过来（实测确认）。
+    // 想翻某个轴就填 -1，想换轴就把 ±1 挪到别的列，芯片斜着装（任意角度）直接把
+    // 对应旋转矩阵抄进来即可 —— 只要是正交阵且 det = +1。
+    // 只翻 Z 不换轴时的症状：转设备 roll 代码 pitch 动、转 pitch 代码 roll 动、
+    // yaw 恒定差 -90°。
+    // 使用时必须在【减零偏 / 硬磁偏置之后】相乘：这些标定值都在芯片框下，
+    // 放在减法之后会被矩阵自动一起变换，数值不用改。
+    Mat3 chip_to_device{{{0.0f, -1.0f, 0.0f},
+                         {-1.0f, 0.0f, 0.0f},
+                         {0.0f, 0.0f, -1.0f}}};
 
-    // 加速度计尺度校准（各轴灵敏度修正系数，1.0 = 不修正）。在符号之后、
-    // 减零偏之前相乘：out = accel_scale * accel_sign * raw - accel_bias。
+    // AK8963（磁力计裸片）-> 芯片框：这是 MPU-9250 数据手册【固定】的对齐关系
+    // （mag.x = accel.y, mag.y = accel.x, mag.z = -accel.z），与板子怎么装无关，
+    // 所以【不能】照抄 chip_to_device 的值。
+    // 磁力计总变换 = chip_to_device · mag_frame_to_chip
+    //   = {{0,-1,0},{-1,0,0},{0,0,-1}} · {{0,1,0},{1,0,0},{0,0,-1}}
+    //   = diag(-1, -1, 1)，即 AK8963 的 X/Y 相对设备框是反向的。
+    // ⚠ 若这里误取成与 chip_to_device 相同（多两个负号），总变换会变成 I，磁力计
+    // 水平方向凭空翻 180°，开融合后 yaw 与实测恒定差 180°（实测 34° vs 216°）。
+    // 2026-11-03 按此修正：yaw 由 34° -> 214°，与手机 216° 仅差 2°。
+    Mat3 mag_frame_to_chip{{{0.0f, 1.0f, 0.0f},
+                            {1.0f, 0.0f, 0.0f},
+                            {0.0f, 0.0f, -1.0f}}};
+
+    // 加速度计尺度校准（各轴灵敏度修正系数，1.0 = 不修正）。在乘安装矩阵之前、
+    // 减零偏之前相乘：out = chip_to_device · (accel_scale · raw - accel_bias)。
     // 实测静止时芯片原始值 |v| = 10.3783 m/s² = 1.05829 g，整体偏大 5.83%。
     // 取 9.80665 / 10.3717 = 0.9455：分母用【z 分量】而非 |v|，因为本配置把
     // X/Y 当作零偏扣掉了（见 accel_bias_m_s2），扣除后垂直分量才应等于 g。
     //   - 若把 X/Y 当真实倾角（bias=0），应改用 |v| 算的 0.9449。
     // 复核：摆几个不同姿态，若 |a| 不再恒为 9.807，说明三轴尺度不一致，需逐轴填。
     Vec3 accel_scale{0.9455f, 0.9455f, 0.9455f};
-    bool mag_swap_xy = true; // AK8963 在 MPU-9250 内相对加速度计旋转了约 90°
 
     // 磁力计硬磁（硬铁）偏置校准，单位：uT。三轴翻转采集最大最小值后计算
     // offset = (max + min) / 2，减去后使读数关于 0 对称。
@@ -117,9 +159,15 @@ public:
     // ⚠ 该次标定质量存疑：|B| 偏低（中国大部应 45~55），且三轴峰峰值相差 23%
     // （理想应相等）。平放时 |mag|≈31.8 uT、磁倾角≈30.7°。需要远离金属/磁源
     // 重做，见 mag_calib_duration_ms 说明。
-    Vec3 mag_offset_ut{27.96f, 10.35f, 27.14f};
+    // ⚠ 定义为【AK8963 原始框】：2026-11-02 的标定值 {27.96, 10.35, 27.14} 是
+    // 芯片框的，按当时的 {y, x, -z} 映射换算过来即 {10.35, 27.96, -27.14}。
+    // 好处是 chip_to_device / mag_frame_to_chip 以后怎么改都不必再动这个值。
+    Vec3 mag_offset_ut{10.35f, 27.96f, -27.14f};
 
     // 是否将磁力计纳入姿态融合。开启后 yaw 才有绝对参考，不会随零偏漂移。
+    // ⚠ 2026-11-03 装到设备上实测：|B| = 77~88 µT（地磁应约 50），且设备静止时
+    // 还在 ±11 µT 地跳 —— 干扰远强于地磁且随时间变化。开着融合会把 yaw 锁死在
+    // 干扰场方向上（表现为转设备而 yaw 不动），所以在排除干扰前必须关掉。
     bool mag_fusion_enabled = true;
 
     // ---- 磁力计硬磁标定（需人工翻动板子，让三轴都扫到正负两极）----
@@ -132,13 +180,19 @@ public:
 
     // 陀螺仪零偏校准（单位：rad/s）。静止时测得的 gyro 输出即为零偏，
     // 读取时减去，消除长时间积分导致的 yaw 漂移。
-    // 开启 gyro_auto_calib_enabled 后，该值会被自动标定结果覆盖。
-    Vec3 gyro_bias_rad_s{-0.035f, -0.005f, -0.005f};
+    // ⚠ 定义在【芯片框】（乘 chip_to_device 之前），与自动标定输出同一坐标系。
+    // 2026-11-03 装到设备上实测：静止时 gyro 残余恒为 (0.00, -0.02, +0.02) rad/s，
+    // z 上那 0.02 被一比一积分成 +1.22 °/s（≈4380 °/h）的 yaw 漂移。由残余反推
+    // 真实零偏 chip = {-0.015, -0.005, -0.015}（35.8°C 时的值）。
+    // 这只是单一温度点，最好靠下面的自动标定每次上电重标。
+    Vec3 gyro_bias_rad_s{-0.015f, -0.005f, -0.015f};
 
     // ---- 陀螺仪零偏自动标定（上电/被调用后检测到静止即采样求均值）----
     // 标定要求板子保持不动：任一轴角速度超阈值、或加速度模值抖动超阈值，
     // 都会丢弃已累积的样本重新计数，因此板子动来动去时永远不会标定成功。
-    bool gyro_auto_calib_enabled = false;
+    // ⚠ 关掉磁力计融合（mag_fusion_enabled = false）后 yaw 没有任何绝对参考，
+    // 只剩陀螺积分，零偏残余会被原封不动地积分成漂移，所以必须开启自动标定。
+    bool gyro_auto_calib_enabled = true;
     uint32_t gyro_calib_samples = 400;     // 采样点数（200Hz 下约 2s）
     uint32_t gyro_calib_warmup_ms = 1000;  // 上电后等待传感器/滤波器稳定
     float gyro_calib_gyro_thresh = 0.05f;  // rad/s，约 2.9°/s
@@ -234,7 +288,7 @@ private:
   [[nodiscard]] bool mag_calibrated() const noexcept { return _mag_calib.done; }
 
   /// 磁力计硬磁标定状态机，由 read_raw 在磁力计数据更新（DRDY）时调用。
-  void mag_calib_feed(const Vec3 &mag_aligned, uint32_t now_ms) noexcept;
+  void mag_calib_feed(const Vec3 &mag_raw, uint32_t now_ms) noexcept;
 
   /// 采样线程：高频读取 + 融合 + 低频日志。
   static void sample_task(void *arg);
@@ -254,7 +308,7 @@ private:
     bool done = false;     // 标定完成
     bool primed = false;   // 已收到第一个样本
     uint32_t start_ms = 0; // 采集起点
-    Vec3 min{};            // 已对齐到加速度计坐标系、未减偏置的磁力计最小值
+    Vec3 min{};            // AK8963 原始框、未减偏置的磁力计最小值
     Vec3 max{};
   };
   MagCalib _mag_calib{};
