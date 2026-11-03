@@ -261,6 +261,25 @@ public:
   [[nodiscard]] Vec3 euler_rad() const noexcept { return _fusion.euler_rad(); }
   [[nodiscard]] Vec3 euler_deg() const noexcept;
 
+  /// 设备当前绕竖直轴（yaw 轴）转动的角速度 [rad/s]，右转为正。
+  /// 取自最近一次采样的陀螺仪 _last_sample.gyro.z：设备框（X 前 / Y 左 / Z 上），
+  /// 已减 gyro_bias_rad_s、已乘 chip_to_device，是瞬时实测角速度，
+  /// 不是融合后 yaw 的差分，因此不受磁力计融合开/关及其收敛过程影响。
+  /// gyro.z > 0 在右手系里是左转，这里取反以与 euler_deg() 的航向约定一致
+  /// （右转为正、yaw 增大为正）；若需与日志里的 gyro.z 同号，去掉负号即可。
+  /// 与 last_sample() 一样是采样线程持续更新的快照（未 begin() 时为 0）。
+  /// 若要「任意轴转动」的合成角速度大小，可对 last_sample().gyro 三轴取模长：
+  /// 平方和开方，单位同为 rad/s。
+  [[nodiscard]] float yaw_rate_rad_s() const noexcept {
+    return -_last_sample.gyro.z;
+  }
+
+  /// 设备当前绕竖直轴（yaw 轴）转动的角速度 [°/s]，右转为正。
+  /// = yaw_rate_rad_s() * 180/pi，常数与 mpu9250.cpp 中零偏打印所用一致。
+  [[nodiscard]] float yaw_rate_deg_s() const noexcept {
+    return yaw_rate_rad_s() * 57.29578f;
+  }
+
 private:
   // 底层 SPI 辅助函数：init 序列中会忽略返回值，故不加 [[nodiscard]]
   esp_err_t write_reg(uint8_t reg, uint8_t val) noexcept;
