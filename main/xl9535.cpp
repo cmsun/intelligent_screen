@@ -227,17 +227,28 @@ bool Xl9535Class::fan_on(void) const
 
 bool Xl9535Class::floor_detected(uint8_t index) const
 {
+    // 四路地面检测：右路 floor_right_pin 在端口 0，其余三路在端口 1。
+    // 用 read_pin 按管脚自动选择输入缓存，不再硬编码 _input1。
+    Pin pin = floor_left_pin;
     switch (index)
     {
     case 0:
-        return (_input1 & pin_mask(floor_left_pin)) != 0;
+        pin = floor_left_pin;
+        break;
     case 1:
-        return (_input1 & pin_mask(floor_middle_pin)) != 0;
+        pin = floor_left_middle_pin;
+        break;
     case 2:
-        return (_input1 & pin_mask(floor_right_pin)) != 0;
+        pin = floor_right_middle_pin;
+        break;
+    case 3:
+        pin = floor_right_pin;
+        break;
     default:
         return false;
     }
+    bool level = false;
+    return read_pin(pin, level) && level;
 }
 
 // 限位信号为低电平有效，读到 0 表示触发限位
@@ -258,10 +269,11 @@ bool Xl9535Class::int_active(void) const
 
 void Xl9535Class::print_status(void) const
 {
-    esplog::info("floor left {} middle {} right {}, limit up {} down {}, fan {}",
+    esplog::info("floor left {} left-mid {} right-mid {} right {}, limit up {} down {}, fan {}",
                  floor_detected(0) ? "detected" : "lost",
                  floor_detected(1) ? "detected" : "lost",
                  floor_detected(2) ? "detected" : "lost",
+                 floor_detected(3) ? "detected" : "lost",
                  head_up_limited() ? "triggered" : "idle",
                  head_down_limited() ? "triggered" : "idle",
                  _fan_level ? "on" : "off");
