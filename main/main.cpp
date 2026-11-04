@@ -88,17 +88,17 @@ extern "C" void app_main(void) {
 
   // XL9535 GPIO 扩展：风扇输出、地面检测输入、抬头/低头限位输入
   // begin 内部完成 I2C 初始化、方向配置并创建轮询任务
-  // if (!Xl9535.begin())
-  // {
-  //   esplog::error("XL9535 init failed");
-  // }
-  // else
-  // {
-  //   xTaskCreate(fan_test_task, "fan_test", 1024 * 5, nullptr, 4, nullptr);
-  // }
+  if (!Xl9535.begin())
+  {
+    esplog::error("XL9535 init failed");
+  }
+  else
+  {
+    xTaskCreate(fan_test_task, "fan_test", 1024 * 5, nullptr, 4, nullptr);
+  }
 
   // IMU 初始化并启动采样线程（begin 内部创建采样线程）
-  Imu.begin();
+  // Imu.begin();
 
   // 电池管理：begin 内部完成 ADC 初始化、用电压初始化 SOC，并创建周期采样任务
   // if (!Battery.begin())

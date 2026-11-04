@@ -251,15 +251,15 @@ bool Xl9535Class::floor_detected(uint8_t index) const
     return read_pin(pin, level) && level;
 }
 
-// 限位信号为低电平有效，读到 0 表示触发限位
+// 头顶/下巴障碍物检测信号为低电平有效，读到 0 表示检测到障碍物
 bool Xl9535Class::head_up_limited(void) const
 {
-    return (_input0 & pin_mask(head_up_limit_pin)) == 0;
+    return (_input0 & pin_mask(head_up_obstacle_pin)) == 0;
 }
 
 bool Xl9535Class::head_down_limited(void) const
 {
-    return (_input0 & pin_mask(head_down_limit_pin)) == 0;
+    return (_input0 & pin_mask(head_down_obstacle_pin)) == 0;
 }
 
 bool Xl9535Class::int_active(void) const
@@ -269,7 +269,7 @@ bool Xl9535Class::int_active(void) const
 
 void Xl9535Class::print_status(void) const
 {
-    esplog::info("floor left {} left-mid {} right-mid {} right {}, limit up {} down {}, fan {}",
+    esplog::info("floor left {} left-mid {} right-mid {} right {}, obstacle up {} down {}, fan {}",
                  floor_detected(0) ? "detected" : "lost",
                  floor_detected(1) ? "detected" : "lost",
                  floor_detected(2) ? "detected" : "lost",

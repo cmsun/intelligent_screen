@@ -65,8 +65,8 @@ public:
     static constexpr Pin floor_left_middle_pin = Pin::io1_3;  // 左中地面检测
     static constexpr Pin floor_right_middle_pin = Pin::io1_4; // 右中地面检测
     static constexpr Pin floor_right_pin = Pin::io0_4;        // 右地面检测
-    static constexpr Pin head_up_limit_pin = Pin::io0_6;      // 抬头限位，低有效
-    static constexpr Pin head_down_limit_pin = Pin::io0_7;    // 低头限位，低有效
+    static constexpr Pin head_up_obstacle_pin = Pin::io0_6;   // 头顶障碍物检测，低有效
+    static constexpr Pin head_down_obstacle_pin = Pin::io0_7; // 下巴障碍物检测，低有效
 
     bool begin(void);
     bool begin(const Config &config);
@@ -81,7 +81,7 @@ public:
     bool fan_on(void) const;
     // 地面检测：index 0=左 1=左中 2=右中 3=右，高电平表示检测到地面
     bool floor_detected(uint8_t index) const;
-    // 限位信号，低电平有效，返回 true 表示触发限位
+    // 头顶/下巴障碍物检测，低电平有效，返回 true 表示检测到障碍物（触发对应方向保护）
     bool head_up_limited(void) const;
     bool head_down_limited(void) const;
     bool int_active(void) const;
