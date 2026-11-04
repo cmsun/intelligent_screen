@@ -1,6 +1,7 @@
 #include "battery.hpp"
 #include "bus_servo.hpp"
 #include "esplog.hpp"
+#include "ir_receiver.hpp"
 #include "micro_ros.hpp"
 #include "motion.hpp"
 #include "mpu9250.hpp"
@@ -84,18 +85,25 @@ extern "C" void app_main(void) {
   // 底盘电机控制（UART1 驱动电机控制板）
   // Motion.begin();
   // vTaskDelay(pdMS_TO_TICKS(1000));
-  // Motion.set_chassis_speed(3.0f, 3.0f);
+  // Motion.set_chassis_speed(1.0f, 0.0f);
 
   // XL9535 GPIO 扩展：风扇输出、地面检测输入、抬头/低头限位输入
   // begin 内部完成 I2C 初始化、方向配置并创建轮询任务
-  if (!Xl9535.begin())
-  {
-    esplog::error("XL9535 init failed");
-  }
-  else
-  {
-    xTaskCreate(fan_test_task, "fan_test", 1024 * 5, nullptr, 4, nullptr);
-  }
+  // if (!Xl9535.begin())
+  // {
+  //   esplog::error("XL9535 init failed");
+  // }
+  // else
+  // {
+  //   xTaskCreate(fan_test_task, "fan_test", 1024 * 5, nullptr, 4, nullptr);
+  // }
+
+  // 红外接收：左右两路 HS-S23P（GPIO13 / GPIO14）
+  // begin 内部创建两个 RMT 接收通道和 NEC 解码任务，收到有效帧会打印日志
+  // if (!IrReceiver.begin())
+  // {
+  //   esplog::error("IR receiver init failed");
+  // }
 
   // IMU 初始化并启动采样线程（begin 内部创建采样线程）
   // Imu.begin();

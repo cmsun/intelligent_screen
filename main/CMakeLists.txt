@@ -8,5 +8,6 @@ idf_component_register(SRCS "setup_motor_id.cpp" "battery.cpp"
                             "motion.cpp"
                             "mpu9250.cpp"
                             "xl9535.cpp"
+                            "ir_receiver.cpp"
                             "main.cpp"
                     INCLUDE_DIRS ".")
