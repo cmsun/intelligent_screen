@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdint>
 
@@ -18,6 +19,20 @@
 #include "micro_ros.hpp"
 #include "motion.hpp"
 #include "mpu9250.hpp"
+
+namespace
+{
+// ---- 与上位机（OrangePi 手柄节点）的速度指令约定 ----
+// 话题 chassis_msgs/velcmd，消息 geometry_msgs/msg/Twist：
+//   linear.x  [m/s]   前进为正
+//   angular.z [rad/s] 转向（实际左右由 MotionClass 轮序决定，可在手柄侧换符号）
+// 上位机需持续发布（建议 >= 20Hz）；超过 kVelcmdTimeoutUs 没收到新指令即自动停车。
+constexpr float kMaxLinearMps = 0.6f;  // 约 36 m/min，接近减速比后的电机上限
+constexpr float kMaxAngularRps = 2.0f; // 约 115 deg/s
+constexpr int64_t kVelcmdTimeoutUs = 500LL * 1000;
+// 串口 115200 下 100Hz 的 IMU 帧会挤占速度指令带宽，降到 10Hz
+constexpr int64_t kImuPublishPeriodUs = 100LL * 1000;
+} // namespace
 
 // 传输方式由 micro_ros 组件自带的 Kconfig 决定：
 //   micro-ROS Settings -> micro-ROS network interface select
@@ -199,13 +214,22 @@ void MicroRosNode::imu_publish(void)
 void MicroRosNode::velcmd_subscribe_callback(const void *arg)
 {
     const auto *msg = static_cast<const geometry_msgs__msg__Twist *>(arg);
-    Motion.set_chassis_speed(static_cast<float>(msg->linear.x), static_cast<float>(msg->angular.z));
+
+    // MotionClass::set_chassis_speed() 与 Twist 同为 SI 单位（m/s、rad/s），
+    // 单位换算在 MotionClass 内部完成，这里只做限幅后直接下发。
+    const float linear = std::clamp(static_cast<float>(msg->linear.x), -kMaxLinearMps, kMaxLinearMps);
+    const float angular = std::clamp(static_cast<float>(msg->angular.z), -kMaxAngularRps, kMaxAngularRps);
+    Motion.set_chassis_speed(linear, angular);
+
+    // 刷新看门狗时间戳，供 micro_ros_task 判断上位机是否还在持续下发
+    RosNode._last_velcmd_us.store(esp_timer_get_time(), std::memory_order_release);
 }
 
 void MicroRosNode::micro_ros_task(void *arg)
 {
     esp_task_wdt_add(nullptr);
     int64_t last_ping_us = esp_timer_get_time();
+    int64_t last_imu_publish_us = 0;
     auto *self = static_cast<MicroRosNode *>(arg);
     rmw_init_options_t *rmw_options = rcl_init_options_get_rmw_init_options(&self->_init_options);
 
@@ -216,15 +240,37 @@ void MicroRosNode::micro_ros_task(void *arg)
 
         if (self->_is_connect)
         {
-            self->imu_publish();
+            const int64_t now_us = esp_timer_get_time();
+
+            // 串口 115200 下按 100Hz 发布 IMU 会挤占速度指令带宽，这里降到 10Hz
+            if (now_us - last_imu_publish_us >= kImuPublishPeriodUs)
+            {
+                last_imu_publish_us = now_us;
+                self->imu_publish();
+            }
 
             if (rclc_executor_spin_some(&self->_executor, RCL_MS_TO_NS(10)) == RCL_RET_OK)
             {
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
 
+            // 手柄断连 / 上位机卡住时，不能让底盘继续跑最后一条速度指令
+            const int64_t last_cmd_us = self->_last_velcmd_us.load(std::memory_order_acquire);
+            if (last_cmd_us != 0 && now_us - last_cmd_us > kVelcmdTimeoutUs)
+            {
+                if (!self->_velcmd_timed_out)
+                {
+                    Motion.set_chassis_speed(0.0f, 0.0f);
+                    self->_velcmd_timed_out = true;
+                    esplog::warn("velcmd timeout, chassis stopped");
+                }
+            }
+            else
+            {
+                self->_velcmd_timed_out = false;
+            }
+
             // 每 5 秒 ping 一次 agent，检测连接是否断开；断开则销毁实体，回到重连流程
-            const int64_t now_us = esp_timer_get_time();
             if (now_us - last_ping_us >= 5LL * 1000 * 1000)
             {
                 last_ping_us = now_us;
@@ -234,6 +280,8 @@ void MicroRosNode::micro_ros_task(void *arg)
                     esplog::warn("micro-ROS agent lost, reconnecting ...");
                     self->_is_connect = false;
                     self->destroy_entities();
+                    Motion.set_chassis_speed(0.0f, 0.0f); // 断链立即停车
+                    self->_last_velcmd_us.store(0, std::memory_order_release);
                 }
             }
         }
@@ -246,6 +294,8 @@ void MicroRosNode::micro_ros_task(void *arg)
                 if(self->create_entities() == RCL_RET_OK)
                 {
                     self->_is_connect = true;
+                    self->_last_velcmd_us.store(0, std::memory_order_release);
+                    self->_velcmd_timed_out = false;
                     last_ping_us = esp_timer_get_time(); // 重置连接检测计时基准，避免刚连上就触发第一次 ping
                 }
                 else

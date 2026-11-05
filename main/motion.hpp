@@ -20,6 +20,7 @@ public:
     ~MotionClass(void) = default;
     void begin(void);
     void power_on(void);
+    /// 设置底盘目标速度：linear [m/s]、angular [rad/s]（与 Twist 单位一致）
     void set_chassis_speed(float linear, float angular);
     //自定义类型实现了std::ostream的operator<<函数后，fmtlib就可以支持自定义类型的字符串格式化，格式化自定义类型时要引入<fmt/ostream.h>头文件
     friend std::ostream &operator<<(std::ostream &os, const MotionClass &m);
@@ -73,6 +74,7 @@ private:
     uint8_t _right_motor_communication_error_count = 0;
     bool _left_motor_communication_error = false;
     bool _right_motor_communication_error = false;
+    // 以下速度量均为内部单位：m/min、rad/min（加速度为 /min^2）
     float _linear_speed_acc = 4 * 3600;
     float _angular_speed_acc = 450 * 20 * 3.1415926f;
     float _linear_speed_set = 0.0f;

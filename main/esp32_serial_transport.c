@@ -19,8 +19,23 @@
 
 #define TAG "esp32_serial_transport"
 
+// ESP32-S3 的 UART0 默认引脚为 GPIO43(TXD) / GPIO44(RXD)。
+// 组件 Kconfig 的引脚 range 只到 33，menuconfig 里无法填写 43/44；
+// 且 console 已切到 USB Serial/JTAG，不再由 console 初始化 UART0 引脚，
+// 若这里继续传 UART_PIN_NO_CHANGE(-1)，TX 会处于未绑定状态而发不出数据。
+// 因此配置为 -1（或未定义）时显式绑定默认引脚，其它值仍按 Kconfig 生效。
+#if defined(CONFIG_MICROROS_UART_TXD) && CONFIG_MICROROS_UART_TXD >= 0
 #define UART_TXD (CONFIG_MICROROS_UART_TXD)
+#else
+#define UART_TXD (43)
+#endif
+
+#if defined(CONFIG_MICROROS_UART_RXD) && CONFIG_MICROROS_UART_RXD >= 0
 #define UART_RXD (CONFIG_MICROROS_UART_RXD)
+#else
+#define UART_RXD (44)
+#endif
+
 #define UART_RTS (CONFIG_MICROROS_UART_RTS)
 #define UART_CTS (CONFIG_MICROROS_UART_CTS)
 

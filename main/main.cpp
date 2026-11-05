@@ -83,9 +83,10 @@ extern "C" void app_main(void) {
   // 设置电机控制板的ID
   // SetupMotorID.begin(1);
   // 底盘电机控制（UART1 驱动电机控制板）
-  // Motion.begin();
+  // 手柄遥控必须启动：begin 内部完成电机使能/速度模式/断连保护，并创建控制任务
+  Motion.begin();
   // vTaskDelay(pdMS_TO_TICKS(1000));
-  // Motion.set_chassis_speed(1.0f, 0.0f);
+  // Motion.set_chassis_speed(1.0f, 0.0f); // 单位 m/s、rad/s
 
   // XL9535 GPIO 扩展：风扇输出、地面检测输入、抬头/低头限位输入
   // begin 内部完成 I2C 初始化、方向配置并创建轮询任务
@@ -118,9 +119,10 @@ extern "C" void app_main(void) {
   // BusServo.begin();
   // xTaskCreate(bus_servo_test_task, "bus_servo_test", 1024 * 4, nullptr, 4, nullptr);
 
-  // micro-ROS 通信：WiFi 连接 + Agent 重连 + IMU 发布/速度指令订阅
+  // micro-ROS 通信（传输方式由 Kconfig 决定，当前为串口 UART0 / 115200）
+  // Agent 重连 + IMU 发布 + 速度指令订阅（OrangePi 手柄节点发布 chassis_msgs/velcmd）
   // RosNode 已在全局构造时绑定 Imu 引用
-  // RosNode.begin();
+  RosNode.begin();
 
   // app_main 到此返回；Imu 为全局实例常驻，Motion/RosNode 各自在独立线程运行。
 }

@@ -143,7 +143,7 @@ void MotionClass::uart_rx_task(void *arg)
         {
             self->_rx_buffer.emplace_back(byte);
         }
-        esplog::debug("motor rx: {:02X}", fmt::join(self->_rx_buffer, " "));
+        // esplog::debug("motor rx: {:02X}", fmt::join(self->_rx_buffer, " "));
         self->_condition.notify_one();
     }
 }
@@ -353,13 +353,16 @@ void MotionClass::speed_set_rx_data_process(MotorBusID id)
     _rx_buffer.clear();
 }
 
-//linear speed and angular speed convert motor RPM.
-//linear: linear speed of chassis, unit: m/min
-//angular: angular speed of chassis, unit: rad/min
+// 对外接口使用 SI 单位，与 geometry_msgs/Twist 一致：
+//   linear  [m/s]   前进为正
+//   angular [rad/s]
+// 内部的速度规划、加速度标定值和 rpm 换算仍基于 m/min、rad/min
+// （见 velocity_planning / speed_convert_rpm），因此这里统一乘 60 转换一次。
 void MotionClass::set_chassis_speed(float linear, float angular)
 {
-    _linear_speed_set = linear;
-    _angular_speed_set = angular;
+    constexpr float kSecToMin = 60.0f;
+    _linear_speed_set = linear * kSecToMin;
+    _angular_speed_set = angular * kSecToMin;
 }
 
 //如果是线速度，vel_cur和vel_set单位为m/min，加速度为m/min^2

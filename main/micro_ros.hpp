@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -39,6 +40,10 @@ private:
     geometry_msgs__msg__Twist _velcmd_msg;
     // 引用全局常驻的 IMU 实例（构造函数绑定）
     MPU9250 &_imu;
+
+    // 速度指令看门狗：订阅回调写入最后收到时刻，micro_ros_task 超时后自动停车
+    std::atomic<int64_t> _last_velcmd_us{0};
+    bool _velcmd_timed_out = false; // 仅 micro_ros_task 访问，避免重复下发停车/刷日志
 
     rcl_ret_t create_entities(void);
     void destroy_entities(void);
