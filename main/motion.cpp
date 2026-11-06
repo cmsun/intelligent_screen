@@ -418,8 +418,8 @@ float MotionClass::velocity_planning(float vel_cur, float vel_set, float acc, ui
 
 std::pair<int16_t, int16_t> MotionClass::speed_convert_rpm(float linear, float angular)
 {
-#define LEFT_SERVO_WISE (-1)
-#define RIGHT_SERVO_WISE (1)
+#define LEFT_SERVO_WISE (1)
+#define RIGHT_SERVO_WISE (-1)
 #define WHEEL_RADIUS 0.03f                                  //轮子半径 单位(m)
 #define WHEEL_CICRUMFERENCE (2 * 3.1415926f * WHEEL_RADIUS) //轮子周长 单位(m)
 #define WHEEL_TREAD 0.19                                    //两个轮子之间的距离 单位(m)
