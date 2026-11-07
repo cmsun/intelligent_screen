@@ -1,5 +1,4 @@
 #include "bus_servo.hpp"
-
 #include "esplog.hpp"
 
 #include <algorithm>
@@ -78,12 +77,14 @@ bool BusServoClass::is_ready(void) const noexcept
 
 bool BusServoClass::move_to_angle(float angle_deg, uint16_t move_time_ms)
 {
-    if (!std::isfinite(angle_deg) || angle_deg < MIN_ANGLE_DEG || angle_deg > MAX_ANGLE_DEG)
+    if (!std::isfinite(angle_deg))
     {
         return false;
     }
 
-    const uint16_t position = angle_to_position(angle_deg);
+    // 软件限位：越界目标一律夹到 0~MAX_ANGLE_DEG，再换算成位置
+    const float limited_angle = std::clamp(angle_deg, MIN_ANGLE_DEG, MAX_ANGLE_DEG);
+    const uint16_t position = angle_to_position(limited_angle);
     std::array<uint8_t, 10> frame = {
         FRAME_HEADER,
         FRAME_HEADER,
@@ -194,18 +195,6 @@ size_t BusServoClass::copy_last_rx(uint8_t *buffer, size_t capacity)
     const size_t copy_size = std::min(capacity, _last_rx_size);
     std::copy_n(_last_rx_data.begin(), copy_size, buffer);
     return copy_size;
-}
-
-uint16_t BusServoClass::angle_to_position(float angle_deg)
-{
-    const float bounded_angle = std::clamp(angle_deg, MIN_ANGLE_DEG, MAX_ANGLE_DEG);
-    return static_cast<uint16_t>(std::lround(bounded_angle * MAX_POSITION / MAX_ANGLE_DEG));
-}
-
-float BusServoClass::position_to_angle(uint16_t position)
-{
-    const uint16_t bounded_position = std::clamp(position, MIN_POSITION, MAX_POSITION);
-    return static_cast<float>(bounded_position) * MAX_ANGLE_DEG / MAX_POSITION;
 }
 
 uint8_t BusServoClass::checksum(const uint8_t *frame, size_t frame_size)

@@ -15,6 +15,7 @@
 #include <rmw_microros/rmw_microros.h>
 #include <rosidl_runtime_c/string_functions.h>
 
+#include "bus_servo.hpp"
 #include "esplog.hpp"
 #include "micro_ros.hpp"
 #include "motion.hpp"
@@ -22,16 +23,26 @@
 
 namespace
 {
-// ---- 与上位机（OrangePi 手柄节点）的速度指令约定 ----
-// 话题 chassis_msgs/velcmd，消息 geometry_msgs/msg/Twist：
-//   linear.x  [m/s]   前进为正
-//   angular.z [rad/s] 转向（实际左右由 MotionClass 轮序决定，可在手柄侧换符号）
-// 上位机需持续发布（建议 >= 20Hz）；超过 kVelcmdTimeoutUs 没收到新指令即自动停车。
+// ---- 与上位机（OrangePi 手柄节点）的指令约定 ----
+// chassis_msgs/velcmd         geometry_msgs/Twist  linear.x [m/s]、angular.z [rad/s]
+// chassis_msgs/servo_cmd      std_msgs/Int32       data = 目标角度 deg
+//                             通信层不做角度限制，限位统一在 BusServoClass 驱动层
+// chassis_msgs/servo_status   chassis_msgs/ServoStatus  ESP32 周期上报舵机状态
+// 上位机需持续发布速度指令（建议 >= 20Hz）；超过 kVelcmdTimeoutUs 没收到即自动停车。
 constexpr float kMaxLinearMps = 0.6f;  // 约 36 m/min，接近减速比后的电机上限
 constexpr float kMaxAngularRps = 2.0f; // 约 115 deg/s
 constexpr int64_t kVelcmdTimeoutUs = 500LL * 1000;
 // 串口 115200 下 100Hz 的 IMU 帧会挤占速度指令带宽，降到 10Hz
 constexpr int64_t kImuPublishPeriodUs = 100LL * 1000;
+
+// 舵机状态：位置 10Hz（与上位机手柄 10Hz 重算目标同步）、电压 0.5Hz
+// 半双工读会短暂阻塞，10Hz 下会占用部分速度指令处理时间
+constexpr int64_t kServoStatusPeriodUs = 100LL * 1000;
+constexpr int64_t kServoVoltagePeriodUs = 2000LL * 1000;
+// 舵机命令：micro-ROS 层不做任何角度限制，只做去重节流
+// 上位机每次收到状态上报（10Hz）发布一次目标角度，节流小于该间隔
+constexpr int64_t kServoCmdIntervalUs = 40LL * 1000;
+constexpr uint16_t kServoMoveTimeMs = 200;
 } // namespace
 
 // 传输方式由 micro_ros 组件自带的 Kconfig 决定：
@@ -128,14 +139,27 @@ rcl_ret_t MicroRosNode::create_entities(void)
                                         ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
                                         "chassis_msgs/imu"));
 
-    // 订阅上位机速度指令（标准消息替代原 chassis_msgs/VelCmd）
+    // 发布舵机状态（自定义消息）；上位机收到 ready=true 后才下发舵机命令
+    RCCHECK(rclc_publisher_init_default(&_servo_status_publisher, &_node,
+                                        ROSIDL_GET_MSG_TYPE_SUPPORT(chassis_msgs, msg, ServoStatus),
+                                        "chassis_msgs/servo_status"));
+
+    // 订阅上位机速度指令
     RCCHECK(rclc_subscription_init_default(&_velcmd_subscription, &_node,
                                            ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
                                            "chassis_msgs/velcmd"));
 
-    RCCHECK(rclc_executor_init(&_executor, &_support.context, 2, &_allocator));
+    // 订阅舵机目标角度（标准 Int32，deg；角度限位由 BusServoClass 驱动层负责）
+    RCCHECK(rclc_subscription_init_default(&_servo_cmd_subscription, &_node,
+                                           ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+                                           "chassis_msgs/servo_cmd"));
+
+    // 2 个订阅 + 余量
+    RCCHECK(rclc_executor_init(&_executor, &_support.context, 4, &_allocator));
     RCCHECK(rclc_executor_add_subscription(&_executor, &_velcmd_subscription, &_velcmd_msg,
                                            &velcmd_subscribe_callback, ON_NEW_DATA));
+    RCCHECK(rclc_executor_add_subscription(&_executor, &_servo_cmd_subscription, &_servo_cmd_msg,
+                                           &servo_cmd_subscribe_callback, ON_NEW_DATA));
 
     return RCL_RET_OK;
 }
@@ -157,10 +181,22 @@ void MicroRosNode::destroy_entities(void)
         esplog::warn("rcl_publisher_fini failed: {}", static_cast<int>(ret));
     }
 
+    ret = rcl_publisher_fini(&_servo_status_publisher, &_node);
+    if (ret != RCL_RET_OK)
+    {
+        esplog::warn("servo status publisher fini failed: {}", static_cast<int>(ret));
+    }
+
     ret = rcl_subscription_fini(&_velcmd_subscription, &_node);
     if (ret != RCL_RET_OK)
     {
         esplog::warn("rcl_subscription_fini failed: {}", static_cast<int>(ret));
+    }
+
+    ret = rcl_subscription_fini(&_servo_cmd_subscription, &_node);
+    if (ret != RCL_RET_OK)
+    {
+        esplog::warn("servo cmd subscription fini failed: {}", static_cast<int>(ret));
     }
 
     ret = rcl_node_fini(&_node);
@@ -211,6 +247,15 @@ void MicroRosNode::imu_publish(void)
     }
 }
 
+void MicroRosNode::servo_status_publish(void)
+{
+    const rcl_ret_t ret = rcl_publish(&_servo_status_publisher, &_servo_status_msg, nullptr);
+    if (ret != RCL_RET_OK)
+    {
+        esplog::warn("servo status publish failed: {}", static_cast<int>(ret));
+    }
+}
+
 void MicroRosNode::velcmd_subscribe_callback(const void *arg)
 {
     const auto *msg = static_cast<const geometry_msgs__msg__Twist *>(arg);
@@ -225,11 +270,39 @@ void MicroRosNode::velcmd_subscribe_callback(const void *arg)
     RosNode._last_velcmd_us.store(esp_timer_get_time(), std::memory_order_release);
 }
 
+void MicroRosNode::servo_cmd_subscribe_callback(const void *arg)
+{
+    const auto *msg = static_cast<const std_msgs__msg__Int32 *>(arg);
+    const int32_t angle_deg = msg->data;
+    const int64_t now_us = esp_timer_get_time();
+
+    // 上位机只在目标角度变化时发布，这里再兜一层节流；总线未就绪时静默忽略
+    if (angle_deg == RosNode._last_servo_cmd_deg ||
+        now_us - RosNode._last_servo_cmd_us < kServoCmdIntervalUs ||
+        !BusServo.is_ready())
+    {
+        return;
+    }
+
+    // Int32 已是角度（deg），直接透传；限位由 BusServo.move_to_angle() 完成
+    if (BusServo.move_to_angle(static_cast<float>(angle_deg), kServoMoveTimeMs))
+    {
+        RosNode._last_servo_cmd_deg = angle_deg;
+        RosNode._last_servo_cmd_us = now_us;
+    }
+    else
+    {
+        esplog::warn("bus servo move to {} deg failed", angle_deg);
+    }
+}
+
 void MicroRosNode::micro_ros_task(void *arg)
 {
     esp_task_wdt_add(nullptr);
     int64_t last_ping_us = esp_timer_get_time();
     int64_t last_imu_publish_us = 0;
+    int64_t last_servo_status_us = 0;
+    int64_t last_servo_voltage_us = 0;
     auto *self = static_cast<MicroRosNode *>(arg);
     rmw_init_options_t *rmw_options = rcl_init_options_get_rmw_init_options(&self->_init_options);
 
@@ -247,6 +320,33 @@ void MicroRosNode::micro_ros_task(void *arg)
             {
                 last_imu_publish_us = now_us;
                 self->imu_publish();
+            }
+
+            // 只要成功读到过一次位置即视为就绪（握手语义），ready 保持为 true；
+            // 单次读取失败时保留上次的 position/angle_deg，避免上位机因 ready=false
+            // 反复跳过目标角度计算导致完全无法控制。
+            if (now_us - last_servo_status_us >= kServoStatusPeriodUs)
+            {
+                last_servo_status_us = now_us;
+                uint16_t position = 0;
+                if (BusServo.is_ready() && BusServo.read_position(position))
+                {
+                    self->_servo_status_msg.ready = true;
+                    self->_servo_status_msg.id = BusServo.id();
+                    self->_servo_status_msg.position = static_cast<int32_t>(position);
+                    self->_servo_status_msg.angle_deg = BusServoClass::position_to_angle(position);
+                }
+
+                if (now_us - last_servo_voltage_us >= kServoVoltagePeriodUs)
+                {
+                    last_servo_voltage_us = now_us;
+                    uint16_t voltage_mv = 0;
+                    if (BusServo.is_ready() && BusServo.read_voltage_mv(voltage_mv))
+                    {
+                        self->_servo_status_msg.voltage_v = static_cast<float>(voltage_mv) / 1000.0f;
+                    }
+                }
+                self->servo_status_publish();
             }
 
             if (rclc_executor_spin_some(&self->_executor, RCL_MS_TO_NS(10)) == RCL_RET_OK)

@@ -26,7 +26,7 @@ static void fan_test_task(void *arg)
   }
 }
 
-// 总线舵机测试任务：在 0~240 度之间往复转动，每次到位后读取实际位置并打印
+// 总线舵机测试任务：在 0~170 度之间往复转动，每次到位后读取实际位置并打印
 static void bus_servo_test_task(void *arg) {
   uint8_t id = 0;
   if (BusServo.discover_id(id)) {
@@ -84,9 +84,7 @@ extern "C" void app_main(void) {
   // SetupMotorID.begin(2);
   // 底盘电机控制（UART1 驱动电机控制板）
   // 手柄遥控必须启动：begin 内部完成电机使能/速度模式/断连保护，并创建控制任务
-  Motion.begin();
-  // vTaskDelay(pdMS_TO_TICKS(1000));
-  // Motion.set_chassis_speed(0.00f, 0.1f); // 单位 m/s、rad/s
+  // Motion.begin();
 
   // XL9535 GPIO 扩展：风扇输出、地面检测输入、抬头/低头限位输入
   // begin 内部完成 I2C 初始化、方向配置并创建轮询任务
@@ -115,12 +113,13 @@ extern "C" void app_main(void) {
   //   esplog::error("Battery init failed");
   // }
 
-  // 总线舵机（UART2 驱动）并启动往复转动测试任务
-  // BusServo.begin();
+  // 总线舵机（UART2 驱动）：micro-ROS 上报 ServoStatus，接收 std_msgs/Int32 目标角度（驱动层限位 0~170 deg）
+  BusServo.begin();
+  // 往复转动测试任务与遥控互斥，保持注释
   // xTaskCreate(bus_servo_test_task, "bus_servo_test", 1024 * 4, nullptr, 4, nullptr);
 
   // micro-ROS 通信（传输方式由 Kconfig 决定，当前为串口 UART0 / 115200）
-  // Agent 重连 + IMU 发布 + 速度指令订阅（OrangePi 手柄节点发布 chassis_msgs/velcmd）
+  // Agent 重连 + IMU/ServoStatus 发布 + velcmd/servo_cmd 订阅（OrangePi 手柄节点）
   // RosNode 已在全局构造时绑定 Imu 引用
   RosNode.begin();
 

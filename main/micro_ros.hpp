@@ -10,8 +10,10 @@
 #include <rclc/rclc.h>
 #include <rclc/subscription.h>
 
+#include <chassis_msgs/msg/servo_status.h>
 #include <geometry_msgs/msg/twist.h>
 #include <sensor_msgs/msg/imu.h>
+#include <std_msgs/msg/int32.h>
 
 class MPU9250;
 
@@ -35,9 +37,13 @@ private:
     rcl_allocator_t _allocator;
     rcl_node_t _node;
     rcl_publisher_t _imu_publisher;
+    rcl_publisher_t _servo_status_publisher;
     rcl_subscription_t _velcmd_subscription;
+    rcl_subscription_t _servo_cmd_subscription;
     sensor_msgs__msg__Imu _imu_msg;
     geometry_msgs__msg__Twist _velcmd_msg;
+    chassis_msgs__msg__ServoStatus _servo_status_msg{};
+    std_msgs__msg__Int32 _servo_cmd_msg{};
     // 引用全局常驻的 IMU 实例（构造函数绑定）
     MPU9250 &_imu;
 
@@ -45,10 +51,16 @@ private:
     std::atomic<int64_t> _last_velcmd_us{0};
     bool _velcmd_timed_out = false; // 仅 micro_ros_task 访问，避免重复下发停车/刷日志
 
+    // 舵机命令节流：仅在 executor 回调中访问，无需加锁
+    int32_t _last_servo_cmd_deg = -1;
+    int64_t _last_servo_cmd_us = 0;
+
     rcl_ret_t create_entities(void);
     void destroy_entities(void);
     void imu_publish(void);
+    void servo_status_publish(void);
     static void velcmd_subscribe_callback(const void *arg);
+    static void servo_cmd_subscribe_callback(const void *arg);
     static void micro_ros_task(void *arg);
 };
 

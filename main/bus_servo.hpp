@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -41,8 +42,11 @@ public:
     static constexpr uint16_t DEFAULT_MOVE_TIME_MS = 1000;
     static constexpr uint16_t MIN_POSITION = 0;
     static constexpr uint16_t MAX_POSITION = 1000;
+    // 舵机机械满量程：位置 0~1000 对应 0~240 deg，仅用于角度与位置的换算
+    static constexpr float PHYSICAL_MAX_ANGLE_DEG = 240.0f;
+    // 软件限位：驱动层允许的角度范围，move_to_angle() 会把目标夹到该区间
     static constexpr float MIN_ANGLE_DEG = 0.0f;
-    static constexpr float MAX_ANGLE_DEG = 240.0f;
+    static constexpr float MAX_ANGLE_DEG = 170.0f;
 
     /// 初始化舵机总线 UART（等效 Arduino 的 Serial2.begin）
     void begin(void);
@@ -62,8 +66,23 @@ public:
     ResponseStatus last_response_status(void) const;
     size_t last_rx_bytes(void) const;
     size_t copy_last_rx(uint8_t *buffer, size_t capacity);
-    static uint16_t angle_to_position(float angle_deg);
-    static float position_to_angle(uint16_t position);
+
+    /// 位置 -> 角度：按机械满量程 0~1000 换算到 0~PHYSICAL_MAX_ANGLE_DEG
+    static constexpr float position_to_angle(uint16_t position) noexcept
+    {
+        const uint16_t bounded_position = std::clamp(position, MIN_POSITION, MAX_POSITION);
+        return static_cast<float>(bounded_position) * PHYSICAL_MAX_ANGLE_DEG / static_cast<float>(MAX_POSITION);
+    }
+
+    /// 角度 -> 位置：纯数值换算，有效域由机械位置范围反推（0~240 deg）；
+    /// 软件限位由 move_to_angle() 负责，本函数不做限位。
+    static constexpr uint16_t angle_to_position(float angle_deg) noexcept
+    {
+        constexpr float min_angle = position_to_angle(MIN_POSITION);
+        constexpr float max_angle = position_to_angle(MAX_POSITION);
+        const float bounded_angle = std::clamp(angle_deg, min_angle, max_angle);
+        return static_cast<uint16_t>(bounded_angle * static_cast<float>(MAX_POSITION) / PHYSICAL_MAX_ANGLE_DEG + 0.5f);
+    }
 
 private:
     static constexpr uint8_t FRAME_HEADER = 0x55;
