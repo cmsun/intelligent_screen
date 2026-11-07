@@ -10,10 +10,10 @@
 #include <rclc/rclc.h>
 #include <rclc/subscription.h>
 
+#include <chassis_msgs/msg/servo_cmd.h>
 #include <chassis_msgs/msg/servo_status.h>
 #include <geometry_msgs/msg/twist.h>
 #include <sensor_msgs/msg/imu.h>
-#include <std_msgs/msg/int32.h>
 
 class MPU9250;
 
@@ -43,7 +43,7 @@ private:
     sensor_msgs__msg__Imu _imu_msg;
     geometry_msgs__msg__Twist _velcmd_msg;
     chassis_msgs__msg__ServoStatus _servo_status_msg{};
-    std_msgs__msg__Int32 _servo_cmd_msg{};
+    chassis_msgs__msg__ServoCmd _servo_cmd_msg{};
     // 引用全局常驻的 IMU 实例（构造函数绑定）
     MPU9250 &_imu;
 

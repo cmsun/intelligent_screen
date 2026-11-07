@@ -23,9 +23,10 @@
 namespace
 {
 // ---- 与上位机（OrangePi 手柄节点）的指令约定 ----
-// chassis_msgs/velcmd         geometry_msgs/Twist  linear.x [m/s]、angular.z [rad/s]
-// chassis_msgs/servo_cmd      std_msgs/Int32       data = 目标角度 deg
-//                             通信层不做角度限制，限位统一在 BusServoClass 驱动层
+// chassis_msgs/velcmd         geometry_msgs/Twist     linear.x [m/s]、angular.z [rad/s]
+// chassis_msgs/servo_cmd      chassis_msgs/ServoCmd  angle_deg [deg]、move_time_ms [ms]
+//                             目标角度与转动时间均由上位机指定，通信层不做角度限制，
+//                             限位统一在 BusServoClass 驱动层
 // chassis_msgs/servo_status   chassis_msgs/ServoStatus  ESP32 周期上报舵机状态
 // 上位机需持续发布速度指令（建议 >= 20Hz）；超过 kVelcmdTimeoutUs 没收到即自动停车。
 constexpr float kMaxLinearMps = 0.6f;  // 约 36 m/min，接近减速比后的电机上限
@@ -38,8 +39,6 @@ constexpr int64_t kImuPublishPeriodUs = 100LL * 1000;
 // 半双工读会短暂阻塞，10Hz 下会占用部分速度指令处理时间
 constexpr int64_t kServoStatusPeriodUs = 100LL * 1000;
 constexpr int64_t kServoVoltagePeriodUs = 2000LL * 1000;
-// 舵机命令：micro-ROS 层不做任何角度限制，只按目标角度去重
-constexpr uint16_t kServoMoveTimeMs = 300;
 } // namespace
 
 // 传输方式由 micro_ros 组件自带的 Kconfig 决定：
@@ -146,9 +145,9 @@ rcl_ret_t MicroRosNode::create_entities(void)
                                            ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
                                            "chassis_msgs/velcmd"));
 
-    // 订阅舵机目标角度（标准 Int32，deg；角度限位由 BusServoClass 驱动层负责）
+    // 订阅舵机命令（目标角度 deg + 转动时间 ms；角度限位由 BusServoClass 驱动层负责）
     RCCHECK(rclc_subscription_init_default(&_servo_cmd_subscription, &_node,
-                                           ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+                                           ROSIDL_GET_MSG_TYPE_SUPPORT(chassis_msgs, msg, ServoCmd),
                                            "chassis_msgs/servo_cmd"));
 
     // 2 个订阅 + 余量
@@ -269,8 +268,9 @@ void MicroRosNode::velcmd_subscribe_callback(const void *arg)
 
 void MicroRosNode::servo_cmd_subscribe_callback(const void *arg)
 {
-    const auto *msg = static_cast<const std_msgs__msg__Int32 *>(arg);
-    const int32_t angle_deg = msg->data;
+    const auto *msg = static_cast<const chassis_msgs__msg__ServoCmd *>(arg);
+    const float angle_deg = msg->angle_deg;
+    const uint16_t move_time_ms = msg->move_time_ms;
 
     // 总线未就绪时静默忽略
     if (!BusServo.is_ready())
@@ -278,10 +278,10 @@ void MicroRosNode::servo_cmd_subscribe_callback(const void *arg)
         return;
     }
 
-    // Int32 已是角度（deg），直接透传；限位由 BusServo.move_to_angle() 完成
-    if (!BusServo.move_to_angle(static_cast<float>(angle_deg), kServoMoveTimeMs))
+    // 目标角度与转动时间均来自上位机；限位由 BusServo.move_to_angle() 完成
+    if (!BusServo.move_to_angle(angle_deg, move_time_ms))
     {
-        esplog::warn("bus servo move to {} deg failed", angle_deg);
+        esplog::warn("bus servo move to {} deg in {} ms failed", angle_deg, move_time_ms);
     }
 }
 

@@ -113,7 +113,7 @@ extern "C" void app_main(void) {
   //   esplog::error("Battery init failed");
   // }
 
-  // 总线舵机（UART2 驱动）：micro-ROS 上报 ServoStatus，接收 std_msgs/Int32 目标角度（驱动层限位 0~170 deg）
+  // 总线舵机（UART2 驱动）：micro-ROS 上报 ServoStatus，接收 ServoCmd 目标角度与转动时间（驱动层限位 0~170 deg）
   BusServo.begin();
   // 往复转动测试任务与遥控互斥，保持注释
   // xTaskCreate(bus_servo_test_task, "bus_servo_test", 1024 * 4, nullptr, 4, nullptr);
