@@ -10,10 +10,14 @@
 #include <rclc/rclc.h>
 #include <rclc/subscription.h>
 
+#include <chassis_msgs/msg/battery_data.h>
+#include <chassis_msgs/msg/imu_data.h>
+#include <chassis_msgs/msg/ir_data.h>
+#include <chassis_msgs/msg/motion_data.h>
 #include <chassis_msgs/msg/servo_cmd.h>
 #include <chassis_msgs/msg/servo_status.h>
+#include <chassis_msgs/msg/xl9535_data.h>
 #include <geometry_msgs/msg/twist.h>
-#include <sensor_msgs/msg/imu.h>
 
 class MPU9250;
 
@@ -29,20 +33,29 @@ public:
 private:
     bool _is_connect = false;
     // begin() 中初始化并配置 transport 参数（UDP 地址或串口），ping 与实体创建均复用该 options
-    rcl_init_options_t _init_options;
+    rcl_init_options_t _init_options{};
     // 串口传输时传给 transport 回调的 UART 端口号（UDP 模式下不使用）
     size_t _serial_port = 0;
-    rclc_executor_t _executor;
-    rclc_support_t _support;
-    rcl_allocator_t _allocator;
-    rcl_node_t _node;
-    rcl_publisher_t _imu_publisher;
-    rcl_publisher_t _servo_status_publisher;
-    rcl_subscription_t _velcmd_subscription;
-    rcl_subscription_t _servo_cmd_subscription;
-    sensor_msgs__msg__Imu _imu_msg;
-    geometry_msgs__msg__Twist _velcmd_msg;
+    // 零初始化：create_entities() 中途失败时 destroy_entities() 也只会对空句柄调用 fini
+    rclc_executor_t _executor{};
+    rclc_support_t _support{};
+    rcl_allocator_t _allocator{};
+    rcl_node_t _node{};
+    rcl_publisher_t _imu_publisher{};
+    rcl_publisher_t _servo_status_publisher{};
+    rcl_publisher_t _xl9535_publisher{};
+    rcl_publisher_t _ir_publisher{};
+    rcl_publisher_t _motion_publisher{};
+    rcl_publisher_t _battery_publisher{};
+    rcl_subscription_t _velcmd_subscription{};
+    rcl_subscription_t _servo_cmd_subscription{};
+    chassis_msgs__msg__ImuData _imu_msg{};
     chassis_msgs__msg__ServoStatus _servo_status_msg{};
+    chassis_msgs__msg__Xl9535Data _xl9535_msg{};
+    chassis_msgs__msg__IrData _ir_msg{};
+    chassis_msgs__msg__MotionData _motion_msg{};
+    chassis_msgs__msg__BatteryData _battery_msg{};
+    geometry_msgs__msg__Twist _velcmd_msg;
     chassis_msgs__msg__ServoCmd _servo_cmd_msg{};
     // 引用全局常驻的 IMU 实例（构造函数绑定）
     MPU9250 &_imu;
@@ -53,7 +66,8 @@ private:
 
     rcl_ret_t create_entities(void);
     void destroy_entities(void);
-    void imu_publish(void);
+    void sensor_data_publish(void);
+    void battery_publish(void);
     void servo_status_publish(void);
     static void velcmd_subscribe_callback(const void *arg);
     static void servo_cmd_subscribe_callback(const void *arg);

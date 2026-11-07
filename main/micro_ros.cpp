@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <array>
 
 #include <esp_task_wdt.h>
 #include <esp_timer.h>
@@ -12,33 +11,50 @@
 #include <rclc/rclc.h>
 #include <rclc/subscription.h>
 #include <rmw_microros/rmw_microros.h>
-#include <rosidl_runtime_c/string_functions.h>
 
+#include "battery.hpp"
 #include "bus_servo.hpp"
 #include "esplog.hpp"
+#include "ir_receiver.hpp"
 #include "micro_ros.hpp"
 #include "motion.hpp"
 #include "mpu9250.hpp"
+#include "xl9535.hpp"
 
 namespace
 {
 // ---- 与上位机（OrangePi 手柄节点）的指令约定 ----
-// chassis_msgs/velcmd         geometry_msgs/Twist     linear.x [m/s]、angular.z [rad/s]
-// chassis_msgs/servo_cmd      chassis_msgs/ServoCmd  angle_deg [deg]、move_time_ms [ms]
-//                             目标角度与转动时间均由上位机指定，通信层不做角度限制，
-//                             限位统一在 BusServoClass 驱动层
-// chassis_msgs/servo_status   chassis_msgs/ServoStatus  ESP32 周期上报舵机状态
+// 订阅：
+//   chassis_msgs/velcmd         geometry_msgs/Twist     linear.x [m/s]、angular.z [rad/s]
+//   chassis_msgs/servo_cmd      chassis_msgs/ServoCmd  angle_deg [deg]、move_time_ms [ms]
+// 发布（均由 ESP32 周期上报）：
+//   chassis_msgs/imu            chassis_msgs/ImuData       欧拉角 + yaw 角速度
+//   chassis_msgs/servo_status   chassis_msgs/ServoStatus   舵机位置/电压
+//   chassis_msgs/xl9535         chassis_msgs/Xl9535Data    地面检测/障碍物检测/风扇/中断
+//   chassis_msgs/ir             chassis_msgs/IrData        红外帧与左右通道活动
+//   chassis_msgs/motion         chassis_msgs/MotionData    底盘速度/电机状态
+//   chassis_msgs/battery        chassis_msgs/BatteryData   电池电压/电流/SOC
 // 上位机需持续发布速度指令（建议 >= 20Hz）；超过 kVelcmdTimeoutUs 没收到即自动停车。
 constexpr float kMaxLinearMps = 0.6f;  // 约 36 m/min，接近减速比后的电机上限
 constexpr float kMaxAngularRps = 2.0f; // 约 115 deg/s
 constexpr int64_t kVelcmdTimeoutUs = 500LL * 1000;
-// 串口 115200 下 100Hz 的 IMU 帧会挤占速度指令带宽，降到 10Hz
-constexpr int64_t kImuPublishPeriodUs = 100LL * 1000;
-
-// 舵机状态：位置 10Hz（与上位机手柄 10Hz 重算目标同步）、电压 0.5Hz
-// 半双工读会短暂阻塞，10Hz 下会占用部分速度指令处理时间
-constexpr int64_t kServoStatusPeriodUs = 100LL * 1000;
+// 串口 115200 下除电池外的状态统一 10Hz 上报，避免挤占速度指令带宽
+constexpr int64_t kStatusPublishPeriodUs = 100LL * 1000;
+// 电池电压/电流/SOC 变化慢，单独按 1Hz 上报
+constexpr int64_t kBatteryPublishPeriodUs = 1000LL * 1000;
+// 舵机电压 0.5Hz；半双工读位置会短暂阻塞，10Hz 下会占用部分速度指令处理时间
 constexpr int64_t kServoVoltagePeriodUs = 2000LL * 1000;
+
+// micro-ROS 自定义消息都是 POD 结构，统一在此发布并告警
+template <typename Msg>
+void publish_msg(const rcl_publisher_t &publisher, const Msg &msg, const char *name)
+{
+    const rcl_ret_t ret = rcl_publish(&publisher, &msg, nullptr);
+    if (ret != RCL_RET_OK)
+    {
+        esplog::warn("{} publish failed: {}", name, static_cast<int>(ret));
+    }
+}
 } // namespace
 
 // 传输方式由 micro_ros 组件自带的 Kconfig 决定：
@@ -67,7 +83,7 @@ MicroRosNode RosNode(Imu);
         rcl_ret_t _rc_ret = (fn);                                                                                      \
         if (_rc_ret != RCL_RET_OK)                                                                                     \
         {                                                                                                              \
-            esplog::error("Failed status on line %d: %d. Aborting.", __LINE__, static_cast<int>(_rc_ret));             \
+            esplog::error("Failed status on line {}: {}. Aborting.", __LINE__, static_cast<int>(_rc_ret));             \
             return _rc_ret;                                                                                            \
         }                                                                                                              \
     } while (0)
@@ -78,7 +94,7 @@ MicroRosNode RosNode(Imu);
         rcl_ret_t _rc_ret = (fn);                                                                                      \
         if (_rc_ret != RCL_RET_OK)                                                                                     \
         {                                                                                                              \
-            esplog::error("Failed status on line %d: %d. Aborting.", __LINE__, static_cast<int>(_rc_ret));             \
+            esplog::error("Failed status on line {}: {}. Aborting.", __LINE__, static_cast<int>(_rc_ret));             \
             return;                                                                                                    \
         }                                                                                                              \
     } while (0)
@@ -130,15 +146,28 @@ rcl_ret_t MicroRosNode::create_entities(void)
     RCCHECK(rclc_support_init_with_options(&_support, 0, NULL, &_init_options, &_allocator));
     RCCHECK(rclc_node_init_default(&_node, "chassis_node", "", &_support));
 
-    // 发布 IMU 数据
+    // 发布 IMU 姿态（自定义精简消息：欧拉角 + yaw 角速度）
     RCCHECK(rclc_publisher_init_default(&_imu_publisher, &_node,
-                                        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
+                                        ROSIDL_GET_MSG_TYPE_SUPPORT(chassis_msgs, msg, ImuData),
                                         "chassis_msgs/imu"));
 
     // 发布舵机状态（自定义消息）；上位机收到 ready=true 后才下发舵机命令
     RCCHECK(rclc_publisher_init_default(&_servo_status_publisher, &_node,
                                         ROSIDL_GET_MSG_TYPE_SUPPORT(chassis_msgs, msg, ServoStatus),
                                         "chassis_msgs/servo_status"));
+
+    RCCHECK(rclc_publisher_init_default(&_xl9535_publisher, &_node,
+                                        ROSIDL_GET_MSG_TYPE_SUPPORT(chassis_msgs, msg, Xl9535Data),
+                                        "chassis_msgs/xl9535"));
+    RCCHECK(rclc_publisher_init_default(&_ir_publisher, &_node,
+                                        ROSIDL_GET_MSG_TYPE_SUPPORT(chassis_msgs, msg, IrData),
+                                        "chassis_msgs/ir"));
+    RCCHECK(rclc_publisher_init_default(&_motion_publisher, &_node,
+                                        ROSIDL_GET_MSG_TYPE_SUPPORT(chassis_msgs, msg, MotionData),
+                                        "chassis_msgs/motion"));
+    RCCHECK(rclc_publisher_init_default(&_battery_publisher, &_node,
+                                        ROSIDL_GET_MSG_TYPE_SUPPORT(chassis_msgs, msg, BatteryData),
+                                        "chassis_msgs/battery"));
 
     // 订阅上位机速度指令
     RCCHECK(rclc_subscription_init_default(&_velcmd_subscription, &_node,
@@ -162,6 +191,11 @@ rcl_ret_t MicroRosNode::create_entities(void)
 
 void MicroRosNode::destroy_entities(void)
 {
+    // support 尚未初始化时（create_entities 在 rclc_support_init 就失败）没有实体可清理
+    if (!rcl_context_is_valid(&_support.context))
+    {
+        return;
+    }
     rmw_context_t *rmw_context = rcl_context_get_rmw_context(&_support.context);
     (void)rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
 
@@ -181,6 +215,17 @@ void MicroRosNode::destroy_entities(void)
     if (ret != RCL_RET_OK)
     {
         esplog::warn("servo status publisher fini failed: {}", static_cast<int>(ret));
+    }
+
+    rcl_publisher_t *publishers[] = {&_xl9535_publisher, &_ir_publisher,
+                                     &_motion_publisher, &_battery_publisher};
+    for (rcl_publisher_t *publisher : publishers)
+    {
+        ret = rcl_publisher_fini(publisher, &_node);
+        if (ret != RCL_RET_OK)
+        {
+            esplog::warn("sensor publisher fini failed: {}", static_cast<int>(ret));
+        }
     }
 
     ret = rcl_subscription_fini(&_velcmd_subscription, &_node);
@@ -208,48 +253,76 @@ void MicroRosNode::destroy_entities(void)
     }
 }
 
-void MicroRosNode::imu_publish(void)
+void MicroRosNode::sensor_data_publish(void)
 {
-    const ImuSample &s = _imu.last_sample();
-    const int64_t now_us = esp_timer_get_time();
-
-    _imu_msg.header.stamp.sec = static_cast<int32_t>(now_us / 1000000);
-    _imu_msg.header.stamp.nanosec = static_cast<uint32_t>((now_us % 1000000) * 1000);
-    rosidl_runtime_c__String__assign(&_imu_msg.header.frame_id, "imu_link");
-
-    const std::array<float, 4> q = _imu.quaternion(); // (w, x, y, z)
-    _imu_msg.orientation.x = q[1];
-    _imu_msg.orientation.y = q[2];
-    _imu_msg.orientation.z = q[3];
-    _imu_msg.orientation.w = q[0];
-
-    _imu_msg.angular_velocity.x = s.gyro.x;
-    _imu_msg.angular_velocity.y = s.gyro.y;
-    _imu_msg.angular_velocity.z = s.gyro.z;
-
-    _imu_msg.linear_acceleration.x = s.accel.x;
-    _imu_msg.linear_acceleration.y = s.accel.y;
-    _imu_msg.linear_acceleration.z = s.accel.z;
-
-    // 协方差未知
-    _imu_msg.orientation_covariance[0] = -1.0;
-    _imu_msg.angular_velocity_covariance[0] = -1.0;
-    _imu_msg.linear_acceleration_covariance[0] = -1.0;
-
-    const rcl_ret_t ret = rcl_publish(&_imu_publisher, &_imu_msg, nullptr);
-    if (ret != RCL_RET_OK)
+    // IMU：只上报欧拉角与 yaw 角速度（deg、deg/s）
+    if (_imu.is_ready())
     {
-        esplog::warn("rcl_publish failed: {}", static_cast<int>(ret));
+        const Vec3 euler = _imu.euler_deg();
+        _imu_msg.roll_deg = euler.x;
+        _imu_msg.pitch_deg = euler.y;
+        _imu_msg.yaw_deg = euler.z;
+        _imu_msg.yaw_rate_deg_s = _imu.yaw_rate_deg_s();
     }
+    publish_msg(_imu_publisher, _imu_msg, "imu");
+
+    // XL9535：四路地面检测 + 头顶/下巴障碍物检测 + 风扇/中断状态
+    _xl9535_msg.floor_left = Xl9535.floor_detected(0);
+    _xl9535_msg.floor_left_middle = Xl9535.floor_detected(1);
+    _xl9535_msg.floor_right_middle = Xl9535.floor_detected(2);
+    _xl9535_msg.floor_right = Xl9535.floor_detected(3);
+    _xl9535_msg.head_up_obstacle = Xl9535.head_up_obstacle();
+    _xl9535_msg.head_down_obstacle = Xl9535.head_down_obstacle();
+    _xl9535_msg.fan_on = Xl9535.fan_on();
+    _xl9535_msg.int_active = Xl9535.int_active();
+    publish_msg(_xl9535_publisher, _xl9535_msg, "xl9535");
+
+    // 红外：最近一帧 NEC 解码结果 + 左右通道 500ms 内活动
+    const IrFrame frame = IrReceiver.last_frame();
+    _ir_msg.side = static_cast<uint8_t>(frame.side == IrSide::Right ? 1 : 0);
+    _ir_msg.address = frame.address;
+    _ir_msg.command = frame.command;
+    _ir_msg.raw_code = frame.raw_code;
+    _ir_msg.address_valid = frame.address_valid;
+    _ir_msg.repeat = frame.repeat;
+    _ir_msg.timestamp_ms = frame.timestamp_ms;
+    _ir_msg.left_active = IrReceiver.signal_seen(IrSide::Left, 500);
+    _ir_msg.right_active = IrReceiver.signal_seen(IrSide::Right, 500);
+    publish_msg(_ir_publisher, _ir_msg, "ir");
+
+    // Motion：目标/当前速度、左右电机 rpm 与状态（速度已换算为 SI）
+    const MotionClass::Status motion = Motion.status();
+    _motion_msg.linear_speed_cur = motion.linear_speed_cur;
+    _motion_msg.angular_speed_cur = motion.angular_speed_cur;
+    _motion_msg.left_motor_rpm = motion.left_motor_rpm;
+    _motion_msg.right_motor_rpm = motion.right_motor_rpm;
+    _motion_msg.left_motor_state = motion.left_motor_state;
+    _motion_msg.right_motor_state = motion.right_motor_state;
+    _motion_msg.left_motor_mode = motion.left_motor_mode;
+    _motion_msg.right_motor_mode = motion.right_motor_mode;
+    _motion_msg.left_communication_error = motion.left_communication_error;
+    _motion_msg.right_communication_error = motion.right_communication_error;
+    publish_msg(_motion_publisher, _motion_msg, "motion");
+
+}
+
+void MicroRosNode::battery_publish(void)
+{
+    // Battery：电压/电流/功率/SOC/状态；按 1Hz 独立上报
+    const BatteryClass::Status battery = Battery.status();
+    _battery_msg.battery_voltage = battery.battery_voltage;
+    _battery_msg.charger_voltage = battery.charger_voltage;
+    _battery_msg.current = battery.current;
+    _battery_msg.power = battery.power;
+    _battery_msg.soc = battery.soc;
+    _battery_msg.state = static_cast<uint8_t>(battery.state);
+    _battery_msg.charge_enabled = battery.charge_enabled;
+    publish_msg(_battery_publisher, _battery_msg, "battery");
 }
 
 void MicroRosNode::servo_status_publish(void)
 {
-    const rcl_ret_t ret = rcl_publish(&_servo_status_publisher, &_servo_status_msg, nullptr);
-    if (ret != RCL_RET_OK)
-    {
-        esplog::warn("servo status publish failed: {}", static_cast<int>(ret));
-    }
+    publish_msg(_servo_status_publisher, _servo_status_msg, "servo status");
 }
 
 void MicroRosNode::velcmd_subscribe_callback(const void *arg)
@@ -289,8 +362,8 @@ void MicroRosNode::micro_ros_task(void *arg)
 {
     esp_task_wdt_add(nullptr);
     int64_t last_ping_us = esp_timer_get_time();
-    int64_t last_imu_publish_us = 0;
-    int64_t last_servo_status_us = 0;
+    int64_t last_status_publish_us = 0;
+    int64_t last_battery_publish_us = 0;
     int64_t last_servo_voltage_us = 0;
     auto *self = static_cast<MicroRosNode *>(arg);
     rmw_init_options_t *rmw_options = rcl_init_options_get_rmw_init_options(&self->_init_options);
@@ -304,19 +377,15 @@ void MicroRosNode::micro_ros_task(void *arg)
         {
             const int64_t now_us = esp_timer_get_time();
 
-            // 串口 115200 下按 100Hz 发布 IMU 会挤占速度指令带宽，这里降到 10Hz
-            if (now_us - last_imu_publish_us >= kImuPublishPeriodUs)
+            // 串口 115200 下除电池外的状态统一 10Hz 上报，避免挤占速度指令带宽
+            if (now_us - last_status_publish_us >= kStatusPublishPeriodUs)
             {
-                last_imu_publish_us = now_us;
-                self->imu_publish();
-            }
+                last_status_publish_us = now_us;
+                self->sensor_data_publish();
 
-            // 只要成功读到过一次位置即视为就绪（握手语义），ready 保持为 true；
-            // 单次读取失败时保留上次的 position/angle_deg，避免上位机因 ready=false
-            // 反复跳过目标角度计算导致完全无法控制。
-            if (now_us - last_servo_status_us >= kServoStatusPeriodUs)
-            {
-                last_servo_status_us = now_us;
+                // 只要成功读到过一次位置即视为就绪（握手语义），ready 保持为 true；
+                // 单次读取失败时保留上次的 position/angle_deg，避免上位机因 ready=false
+                // 反复跳过目标角度计算导致完全无法控制。
                 uint16_t position = 0;
                 if (BusServo.is_ready() && BusServo.read_position(position))
                 {
@@ -336,6 +405,13 @@ void MicroRosNode::micro_ros_task(void *arg)
                     }
                 }
                 self->servo_status_publish();
+            }
+
+            // 电池量变化慢，按 1Hz 单独上报，不随 10Hz 状态帧一起发
+            if (now_us - last_battery_publish_us >= kBatteryPublishPeriodUs)
+            {
+                last_battery_publish_us = now_us;
+                self->battery_publish();
             }
 
             if (rclc_executor_spin_some(&self->_executor, RCL_MS_TO_NS(10)) == RCL_RET_OK)
@@ -390,6 +466,8 @@ void MicroRosNode::micro_ros_task(void *arg)
                 else
                 {
                     esplog::error("micro-ROS agent connected, but create entities failed");
+                    // 清理已创建的实体，否则静态实体池被占满，后续重试只会继续失败
+                    self->destroy_entities();
                 }
             }
             else

@@ -252,12 +252,12 @@ bool Xl9535Class::floor_detected(uint8_t index) const
 }
 
 // 头顶/下巴障碍物检测信号为低电平有效，读到 0 表示检测到障碍物
-bool Xl9535Class::head_up_limited(void) const
+bool Xl9535Class::head_up_obstacle(void) const
 {
     return (_input0 & pin_mask(head_up_obstacle_pin)) == 0;
 }
 
-bool Xl9535Class::head_down_limited(void) const
+bool Xl9535Class::head_down_obstacle(void) const
 {
     return (_input0 & pin_mask(head_down_obstacle_pin)) == 0;
 }
@@ -274,8 +274,8 @@ void Xl9535Class::print_status(void) const
                  floor_detected(1) ? "detected" : "lost",
                  floor_detected(2) ? "detected" : "lost",
                  floor_detected(3) ? "detected" : "lost",
-                 head_up_limited() ? "triggered" : "idle",
-                 head_down_limited() ? "triggered" : "idle",
+                 head_up_obstacle() ? "triggered" : "idle",
+                 head_down_obstacle() ? "triggered" : "idle",
                  _fan_level ? "on" : "off");
 }
 

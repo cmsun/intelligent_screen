@@ -365,6 +365,24 @@ void MotionClass::set_chassis_speed(float linear, float angular)
     _angular_speed_set = angular * kSecToMin;
 }
 
+MotionClass::Status MotionClass::status(void) const noexcept
+{
+    // 内部速度单位是 m/min、rad/min，上报时统一换算成 SI（与 Twist 一致）
+    constexpr float kMinToSec = 1.0f / 60.0f;
+    Status s;
+    s.linear_speed_cur = _linear_speed_cur * kMinToSec;
+    s.angular_speed_cur = _angular_speed_cur * kMinToSec;
+    s.left_motor_rpm = _left_motor_rpm;
+    s.right_motor_rpm = _right_motor_rpm;
+    s.left_motor_state = static_cast<uint8_t>(_left_motor_state);
+    s.right_motor_state = static_cast<uint8_t>(_right_motor_state);
+    s.left_motor_mode = static_cast<uint8_t>(_left_motor_mode);
+    s.right_motor_mode = static_cast<uint8_t>(_right_motor_mode);
+    s.left_communication_error = _left_motor_communication_error;
+    s.right_communication_error = _right_motor_communication_error;
+    return s;
+}
+
 //如果是线速度，vel_cur和vel_set单位为m/min，加速度为m/min^2
 //如果是角速度，vel_cur和vel_set单位为rad/min，加速度为rad/min^2
 //interval：两次调用函数的时间间隔，单位为ms

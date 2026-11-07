@@ -22,6 +22,24 @@ public:
     void power_on(void);
     /// 设置底盘目标速度：linear [m/s]、angular [rad/s]（与 Twist 单位一致）
     void set_chassis_speed(float linear, float angular);
+
+    /// 底盘状态快照，供 micro-ROS 上报；速度已由内部 m/min、rad/min 换算为 SI
+    struct Status
+    {
+        float linear_speed_cur = 0.0f;  // m/s
+        float angular_speed_cur = 0.0f; // rad/s
+        int16_t left_motor_rpm = 0;
+        int16_t right_motor_rpm = 0;
+        uint8_t left_motor_state = 0;   // 0=disable 1=enable
+        uint8_t right_motor_state = 0;
+        uint8_t left_motor_mode = 0;    // 0=open 1=current 2=speed 3=position
+        uint8_t right_motor_mode = 0;
+        bool left_communication_error = false;
+        bool right_communication_error = false;
+    };
+
+    [[nodiscard]] Status status(void) const noexcept;
+
     //自定义类型实现了std::ostream的operator<<函数后，fmtlib就可以支持自定义类型的字符串格式化，格式化自定义类型时要引入<fmt/ostream.h>头文件
     friend std::ostream &operator<<(std::ostream &os, const MotionClass &m);
 

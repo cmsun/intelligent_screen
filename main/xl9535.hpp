@@ -82,8 +82,8 @@ public:
     // 地面检测：index 0=左 1=左中 2=右中 3=右，高电平表示检测到地面
     bool floor_detected(uint8_t index) const;
     // 头顶/下巴障碍物检测，低电平有效，返回 true 表示检测到障碍物（触发对应方向保护）
-    bool head_up_limited(void) const;
-    bool head_down_limited(void) const;
+    bool head_up_obstacle(void) const;
+    bool head_down_obstacle(void) const;
     bool int_active(void) const;
     void print_status(void) const;
 

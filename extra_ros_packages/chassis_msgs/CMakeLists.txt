@@ -7,6 +7,11 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ServoStatus.msg"
   "msg/ServoCmd.msg"
+  "msg/ImuData.msg"
+  "msg/Xl9535Data.msg"
+  "msg/IrData.msg"
+  "msg/MotionData.msg"
+  "msg/BatteryData.msg"
 )
 
 ament_export_dependencies(rosidl_default_runtime)
