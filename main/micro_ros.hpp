@@ -51,9 +51,8 @@ private:
     std::atomic<int64_t> _last_velcmd_us{0};
     bool _velcmd_timed_out = false; // 仅 micro_ros_task 访问，避免重复下发停车/刷日志
 
-    // 舵机命令节流：仅在 executor 回调中访问，无需加锁
+    // 舵机命令去重：仅在 executor 回调中访问，无需加锁
     int32_t _last_servo_cmd_deg = -1;
-    int64_t _last_servo_cmd_us = 0;
 
     rcl_ret_t create_entities(void);
     void destroy_entities(void);

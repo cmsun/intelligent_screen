@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <array>
-#include <cstdint>
 
 #include <esp_task_wdt.h>
 #include <esp_timer.h>
@@ -39,10 +38,8 @@ constexpr int64_t kImuPublishPeriodUs = 100LL * 1000;
 // 半双工读会短暂阻塞，10Hz 下会占用部分速度指令处理时间
 constexpr int64_t kServoStatusPeriodUs = 100LL * 1000;
 constexpr int64_t kServoVoltagePeriodUs = 2000LL * 1000;
-// 舵机命令：micro-ROS 层不做任何角度限制，只做去重节流
-// 上位机每次收到状态上报（10Hz）发布一次目标角度，节流小于该间隔
-constexpr int64_t kServoCmdIntervalUs = 40LL * 1000;
-constexpr uint16_t kServoMoveTimeMs = 200;
+// 舵机命令：micro-ROS 层不做任何角度限制，只按目标角度去重
+constexpr uint16_t kServoMoveTimeMs = 300;
 } // namespace
 
 // 传输方式由 micro_ros 组件自带的 Kconfig 决定：
@@ -274,12 +271,9 @@ void MicroRosNode::servo_cmd_subscribe_callback(const void *arg)
 {
     const auto *msg = static_cast<const std_msgs__msg__Int32 *>(arg);
     const int32_t angle_deg = msg->data;
-    const int64_t now_us = esp_timer_get_time();
 
-    // 上位机只在目标角度变化时发布，这里再兜一层节流；总线未就绪时静默忽略
-    if (angle_deg == RosNode._last_servo_cmd_deg ||
-        now_us - RosNode._last_servo_cmd_us < kServoCmdIntervalUs ||
-        !BusServo.is_ready())
+    // 总线未就绪时静默忽略
+    if (!BusServo.is_ready())
     {
         return;
     }
@@ -288,7 +282,6 @@ void MicroRosNode::servo_cmd_subscribe_callback(const void *arg)
     if (BusServo.move_to_angle(static_cast<float>(angle_deg), kServoMoveTimeMs))
     {
         RosNode._last_servo_cmd_deg = angle_deg;
-        RosNode._last_servo_cmd_us = now_us;
     }
     else
     {
