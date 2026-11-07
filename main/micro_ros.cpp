@@ -279,11 +279,7 @@ void MicroRosNode::servo_cmd_subscribe_callback(const void *arg)
     }
 
     // Int32 已是角度（deg），直接透传；限位由 BusServo.move_to_angle() 完成
-    if (BusServo.move_to_angle(static_cast<float>(angle_deg), kServoMoveTimeMs))
-    {
-        RosNode._last_servo_cmd_deg = angle_deg;
-    }
-    else
+    if (!BusServo.move_to_angle(static_cast<float>(angle_deg), kServoMoveTimeMs))
     {
         esplog::warn("bus servo move to {} deg failed", angle_deg);
     }
