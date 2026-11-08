@@ -109,8 +109,6 @@ private:
     static void uart_rx_task(void *arg);
     void mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd);
     void speed_set_rx_data_process(MotorBusID id);
-    static float velocity_planning(float vel_cur, float vel_set, float acc, uint32_t interval);
-    static std::pair<int16_t, int16_t> speed_convert_rpm(float linear, float angular);
     static void motion_task(void *arg);
 };
 

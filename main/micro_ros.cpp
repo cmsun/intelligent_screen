@@ -75,7 +75,7 @@ extern "C"
 }
 #endif
 
-MicroRosNode RosNode(Imu);
+MicroRosNode RosNode;
 
 #define RCCHECK(fn)                                                                                                    \
     do                                                                                                                 \
@@ -256,13 +256,13 @@ void MicroRosNode::destroy_entities(void)
 void MicroRosNode::sensor_data_publish(void)
 {
     // IMU：只上报欧拉角与 yaw 角速度（deg、deg/s）
-    if (_imu.is_ready())
+    if (Imu.is_ready())
     {
-        const Vec3 euler = _imu.euler_deg();
+        const Vec3 euler = Imu.euler_deg();
         _imu_msg.roll_deg = euler.x;
         _imu_msg.pitch_deg = euler.y;
         _imu_msg.yaw_deg = euler.z;
-        _imu_msg.yaw_rate_deg_s = _imu.yaw_rate_deg_s();
+        _imu_msg.yaw_rate_deg_s = Imu.yaw_rate_deg_s();
     }
     publish_msg(_imu_publisher, _imu_msg, "imu");
 

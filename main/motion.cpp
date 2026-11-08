@@ -1,11 +1,12 @@
 #include "motion.hpp"
 
 #include "esplog.hpp"
-#include "fmt/ranges.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <utility>
@@ -21,6 +22,7 @@ MotionClass Motion;
 
 namespace
 {
+// ---- 电机控制板 UART / 电源 ----
 constexpr uart_port_t kMotorUart = UART_NUM_1;
 constexpr int kMotorUartTxPin = 18; // 电机控制板 UART TX（原 Arduino Serial1 TX）
 constexpr int kMotorUartRxPin = 17; // 电机控制板 UART RX（原 Arduino Serial1 RX）
@@ -28,6 +30,33 @@ constexpr uint32_t kMotorUartBaud = 38400;
 constexpr int kMotorPowerGpio = 39; // 电机电源使能引脚（原 pinMode(39, OUTPUT)）
 
 constexpr uint8_t kCrcPolyReflected = 0x8C; // 0x31 按位反写，右下移实现用
+
+// ---- 电机协议帧 ----
+constexpr std::size_t kFrameSize = 10;
+constexpr uint8_t kCmdMode = 0xA0;      // 模式 / 使能类指令
+constexpr uint8_t kCmdSetPid = 0xBD;    // 设定 PID 参数
+constexpr uint8_t kCmdSetSpeed = 0x64;  // 设定转速
+constexpr uint8_t kSpeedAck = 0x65;     // 转速设定应答
+constexpr uint8_t kSpeedAccTime = 0x02; // 转速指令的加速时间字段
+
+// ---- 底盘几何与传动参数（speed_convert_rpm）----
+constexpr int kLeftServoWise = 1;                                // 左电机转向
+constexpr int kRightServoWise = -1;                               // 右电机转向
+constexpr float kPi = 3.1415926f;
+constexpr float kWheelRadius = 0.03f;                            // 轮子半径 [m]
+constexpr float kWheelCircumference = 2.0f * kPi * kWheelRadius; // 轮子周长 [m]
+constexpr double kWheelTread = 0.19;    // 左右轮距 [m]；沿用原宏的 double 语义以保持 rpm 结果不变
+constexpr float kGearRatio = 10.0f;                               // 电机 rpm = 轮子 rpm × 减速比
+constexpr float kMaxMotorRpm = 3000.0f;                           // 电机转速限幅
+
+// ---- 速度规划与任务时序 ----
+constexpr float kSecondsPerMinute = 60.0f;
+constexpr float kVelocityEpsilon = 0.000001f; // 速度差小于该值即视为相等
+constexpr uint32_t kPlanIntervalMs = 100;     // 两次速度规划的最小间隔
+constexpr uint32_t kInitResponseWaitMs = 300; // 初始化指令等待应答
+constexpr uint32_t kSpeedResponseWaitMs = 30; // 转速指令等待应答
+constexpr uint32_t kMotorCmdGapMs = 5;        // 左右电机指令间隔
+constexpr uint8_t kCommErrorThreshold = 3;    // 连续通信错误判定阈值
 
 // CRC-8/MAXIM：多项式 0x31、初值 0x00、输入反写(refin=true)、输出反写(refout=true)、
 // 结果异或 0x00。这里用低位在前的等价写法：每字节直接异或、右移、命中时异或反写多项式。
@@ -53,50 +82,112 @@ uint32_t millis() noexcept
 {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000);
 }
+
+// 填好最后一字节 CRC 并发送整帧（帧长固定 kFrameSize）
+void send_frame(std::span<uint8_t> frame) noexcept
+{
+    frame.back() = calc_crc8(frame.first(frame.size() - 1));
+    uart_write_bytes(kMotorUart, frame.data(), frame.size());
+}
+
+void motor_enable(MotionClass::MotorBusID id) noexcept
+{
+    std::array<uint8_t, kFrameSize> frame{
+        static_cast<uint8_t>(id), kCmdMode,
+        static_cast<uint8_t>(MotionClass::ModeCmd::SetEnable)};
+    send_frame(frame);
+}
+
+void motor_set_drive_mode(MotionClass::MotorBusID id, MotionClass::ModeCmd mode) noexcept
+{
+    std::array<uint8_t, kFrameSize> frame{
+        static_cast<uint8_t>(id), kCmdMode, static_cast<uint8_t>(mode)};
+    send_frame(frame);
+}
+
+void motor_set_disconnect_stop(MotionClass::MotorBusID id) noexcept
+{
+    std::array<uint8_t, kFrameSize> frame{
+        static_cast<uint8_t>(id), kCmdMode,
+        static_cast<uint8_t>(MotionClass::ModeCmd::EnableDisConnectStop)};
+    send_frame(frame);
+}
+
+void motor_set_pid(MotionClass::MotorBusID id) noexcept
+{
+    std::array<uint8_t, kFrameSize> frame{
+        static_cast<uint8_t>(id), kCmdSetPid, 0x02, 0x28, 0x00, 0x0A, 0x00, 0x0C, 0x0A};
+    send_frame(frame);
+}
+
+void motor_set_speed(MotionClass::MotorBusID id, int16_t speed) noexcept
+{
+    std::array<uint8_t, kFrameSize> frame{static_cast<uint8_t>(id), kCmdSetSpeed};
+    frame[2] = static_cast<uint8_t>(speed >> 8);
+    frame[3] = static_cast<uint8_t>(speed & 0xFF);
+    frame[6] = kSpeedAccTime;
+    send_frame(frame);
+}
+
+// 线速度：vel_cur/vel_set [m/min]、acc [m/min²]；角速度：rad/min、rad/min²
+// interval：两次调用的时间间隔 [ms]
+float velocity_planning(float vel_cur, float vel_set, float acc, uint32_t interval)
+{
+    acc = fabsf(acc);
+
+    // 单精度约 7 位有效数字，速度差小于 kVelocityEpsilon 即视为相等
+    if (fabsf(vel_set - vel_cur) >= kVelocityEpsilon)
+    {
+        // 用 copysign 给 1 赋方向判断同向/反向，避免两速度相乘溢出
+        const float direction = copysignf(1, vel_cur) * copysignf(1, vel_set);
+        if (direction > 0) // 当前速度与目标速度同向
+        {
+            acc = copysignf(acc, vel_set - vel_cur);
+        }
+        else if (direction < 0) // 反向
+        {
+            acc = copysignf(acc, vel_set);
+        }
+        else // 至少一个速度为 0
+        {
+            acc = copysignf(acc, vel_set == 0 ? -vel_cur : vel_set);
+        }
+
+        const float minutes = interval / 1000.0f / kSecondsPerMinute; // 调用间隔，单位 min
+        const float change = acc * minutes;                             // 速度改变量，单位 m/min 或 rad/min
+        float vel_new = vel_cur + change;
+        if ((acc < 0 && vel_new < vel_set) || (acc > 0 && vel_new > vel_set)) // 加减速不能超过目标速度
+        {
+            vel_new = vel_set;
+        }
+        return vel_new;
+    }
+    return vel_set;
+}
+
+std::pair<int16_t, int16_t> speed_convert_rpm(float linear, float angular)
+{
+    // 差速：左右轮线速度 = 车体线速度 ± 角速度 × 半轮距（线速度 m/min、角速度 rad/min）
+    const double half_tread = kWheelTread / 2;
+    const float left_wheel_linear_speed = linear + angular * half_tread;
+    const float right_wheel_linear_speed = linear - angular * half_tread;
+
+    // 轮子转速 [rpm] = 轮线速度 / 轮子周长
+    const float left_wheel_rpm = left_wheel_linear_speed / kWheelCircumference;
+    const float right_wheel_rpm = right_wheel_linear_speed / kWheelCircumference;
+
+    // 电机 rpm = 轮子 rpm × 减速比；保留原实现在 int16_t 上取整后再乘方向/限幅的行为
+    int16_t left_motor_rpm = left_wheel_rpm * kGearRatio;
+    int16_t right_motor_rpm = right_wheel_rpm * kGearRatio;
+    left_motor_rpm *= kLeftServoWise;
+    right_motor_rpm *= kRightServoWise;
+
+    const auto clamp_rpm = [](int16_t rpm) {
+        return static_cast<int16_t>(std::clamp(static_cast<float>(rpm), -kMaxMotorRpm, kMaxMotorRpm));
+    };
+    return {clamp_rpm(left_motor_rpm), clamp_rpm(right_motor_rpm)};
+}
 } // namespace
-
-static inline void motor_enable(MotionClass::MotorBusID id)
-{
-    uint8_t buff[10] = {uint8_t(id), 0xA0, uint8_t(MotionClass::ModeCmd::SetEnable)};
-    uint8_t crc = calc_crc8(std::span(buff).first(sizeof(buff) - 1));
-    buff[sizeof(buff) - 1] = crc;
-    uart_write_bytes(kMotorUart, buff, sizeof(buff));
-}
-
-static inline void motor_set_drive_mode(MotionClass::MotorBusID id, MotionClass::ModeCmd mode)
-{
-    uint8_t buff[10] = {uint8_t(id), 0xA0, uint8_t(mode)};
-    uint8_t crc = calc_crc8(std::span(buff).first(sizeof(buff) - 1));
-    buff[sizeof(buff) - 1] = crc;
-    uart_write_bytes(kMotorUart, buff, sizeof(buff));
-}
-
-static inline void motor_set_disconnect_stop(MotionClass::MotorBusID id)
-{
-    uint8_t buff[10] = {uint8_t(id), 0xA0, uint8_t(MotionClass::ModeCmd::EnableDisConnectStop)};
-    uint8_t crc = calc_crc8(std::span(buff).first(sizeof(buff) - 1));
-    buff[sizeof(buff) - 1] = crc;
-    uart_write_bytes(kMotorUart, buff, sizeof(buff));
-}
-
-static inline void motor_set_pid(MotionClass::MotorBusID id)
-{
-    uint8_t buff[10] = {uint8_t(id), 0xBD, 0x02, 0x28, 0x00, 0x0A, 0x00, 0x0C, 0x0A};
-    uint8_t crc = calc_crc8(std::span(buff).first(sizeof(buff) - 1));
-    buff[sizeof(buff) - 1] = crc;
-    uart_write_bytes(kMotorUart, buff, sizeof(buff));
-}
-
-static inline void motor_set_speed(MotionClass::MotorBusID id, int16_t speed)
-{
-    uint8_t buff[10] = {uint8_t(id), 0x64};
-    buff[2] = speed >> 8;
-    buff[3] = speed & 0xFF;
-    buff[6] = 0x02;
-    uint8_t crc = calc_crc8(std::span(buff).first(sizeof(buff) - 1));
-    buff[sizeof(buff) - 1] = crc;
-    uart_write_bytes(kMotorUart, buff, sizeof(buff));
-}
 
 void MotionClass::begin(void)
 {
@@ -279,11 +370,11 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
     }
     else
     {
-        // 通信错误计数，连续3次通信错误则认为电机通信异常
+        // 连续 kCommErrorThreshold 次通信错误则认为电机通信异常
         if (id == MotorBusID::left)
         {
             esplog::warn("left motor communication error.");
-            if (_left_motor_communication_error_count < 2)
+            if (_left_motor_communication_error_count < kCommErrorThreshold - 1)
             {
                 _left_motor_communication_error_count++;
             }
@@ -295,7 +386,7 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
         else if (id == MotorBusID::right)
         {
             esplog::warn("right motor communication error.");
-            if (_right_motor_communication_error_count < 2)
+            if (_right_motor_communication_error_count < kCommErrorThreshold - 1)
             {
                 _right_motor_communication_error_count++;
             }
@@ -312,7 +403,7 @@ void MotionClass::mode_cmd_rx_data_process(MotorBusID id, ModeCmd cmd)
 void MotionClass::speed_set_rx_data_process(MotorBusID id)
 {
     if (_rx_buffer.size() == 10 &&
-        _rx_buffer[1] == 0x65 &&
+        _rx_buffer[1] == kSpeedAck &&
         _rx_buffer[9] == calc_crc8(std::span(_rx_buffer).first(9)))
     {
         if (id == MotorBusID::left && static_cast<MotorBusID>(_rx_buffer[0]) == MotorBusID::left)
@@ -328,25 +419,25 @@ void MotionClass::speed_set_rx_data_process(MotorBusID id)
     }
     else
     {
-        // 通信错误计数，连续3次通信错误则认为电机通信异常
+        // 连续 kCommErrorThreshold 次通信错误则认为电机通信异常
         if (id == MotorBusID::left)
         {
             esplog::warn("left motor communication error.");
             _left_motor_communication_error_count++;
-            if (_left_motor_communication_error_count == 3)
+            if (_left_motor_communication_error_count == kCommErrorThreshold)
             {
-              _left_motor_communication_error_count = 0;
-              _left_motor_communication_error = true;
+                _left_motor_communication_error_count = 0;
+                _left_motor_communication_error = true;
             }
         }
         else if (id == MotorBusID::right)
         {
             esplog::warn("right motor communication error.");
             _right_motor_communication_error_count++;
-            if (_right_motor_communication_error_count == 3)
+            if (_right_motor_communication_error_count == kCommErrorThreshold)
             {
-              _right_motor_communication_error_count = 0;
-              _right_motor_communication_error = true;
+                _right_motor_communication_error_count = 0;
+                _right_motor_communication_error = true;
             }
         }
     }
@@ -357,18 +448,17 @@ void MotionClass::speed_set_rx_data_process(MotorBusID id)
 //   linear  [m/s]   前进为正
 //   angular [rad/s]
 // 内部的速度规划、加速度标定值和 rpm 换算仍基于 m/min、rad/min
-// （见 velocity_planning / speed_convert_rpm），因此这里统一乘 60 转换一次。
+// （见 velocity_planning / speed_convert_rpm），因此这里统一乘 kSecondsPerMinute 转换一次。
 void MotionClass::set_chassis_speed(float linear, float angular)
 {
-    constexpr float kSecToMin = 60.0f;
-    _linear_speed_set = linear * kSecToMin;
-    _angular_speed_set = angular * kSecToMin;
+    _linear_speed_set = linear * kSecondsPerMinute;
+    _angular_speed_set = angular * kSecondsPerMinute;
 }
 
 MotionClass::Status MotionClass::status(void) const noexcept
 {
     // 内部速度单位是 m/min、rad/min，上报时统一换算成 SI（与 Twist 一致）
-    constexpr float kMinToSec = 1.0f / 60.0f;
+    constexpr float kMinToSec = 1.0f / kSecondsPerMinute;
     Status s;
     s.linear_speed_cur = _linear_speed_cur * kMinToSec;
     s.angular_speed_cur = _angular_speed_cur * kMinToSec;
@@ -381,90 +471,6 @@ MotionClass::Status MotionClass::status(void) const noexcept
     s.left_communication_error = _left_motor_communication_error;
     s.right_communication_error = _right_motor_communication_error;
     return s;
-}
-
-//如果是线速度，vel_cur和vel_set单位为m/min，加速度为m/min^2
-//如果是角速度，vel_cur和vel_set单位为rad/min，加速度为rad/min^2
-//interval：两次调用函数的时间间隔，单位为ms
-float MotionClass::velocity_planning(float vel_cur, float vel_set, float acc, uint32_t interval)
-{
-    float direction, minutes, vel_new, change;
-
-    acc = fabsf(acc);
-
-    //单精度浮点数能表示7位有效数字(整数部分加小数部分)。
-    //所以当目标速度和当前速度之差大于等于0.000001f时认为两个速度不相等，速度之差小于0.000001f时才认为速度相等。
-    if (fabsf(vel_set - vel_cur) >= 0.000001f)
-    {
-        direction = copysignf(1, vel_cur) *
-                    copysignf(1, vel_set); //判断两个速度是同向还是反向，用copysign给1赋值方向，防止相乘溢出
-        if (direction > 0)                 //当前速度和目标速度同向
-        {
-            acc = copysignf(acc, vel_set - vel_cur);
-        }
-        else if (direction < 0) //当前速度和目标速度反向
-        {
-            acc = copysignf(acc, vel_set);
-        }
-        else
-        {
-            if (vel_set == 0)
-            {
-                acc = copysignf(acc, -vel_cur);
-            }
-            else
-            {
-                acc = copysignf(acc, vel_set);
-            }
-        }
-
-        minutes = interval / 1000.f / 60.f;                                   //两次函数调用的时间间隔 UNIT：min
-        change = acc * minutes;                                               //根据加速度计算速度改变量 UNIT:m/s
-        vel_new = vel_cur + change;                                           //上个周期速度加上速度改变量 UNIT:m/min
-        if ((acc < 0 && vel_new < vel_set) || (acc > 0 && vel_new > vel_set)) //加减速后不能超过目标速度
-        {
-            vel_new = vel_set;
-        }
-    }
-    else
-    {
-        vel_new = vel_set;
-    }
-
-    return vel_new;
-}
-
-std::pair<int16_t, int16_t> MotionClass::speed_convert_rpm(float linear, float angular)
-{
-#define LEFT_SERVO_WISE (1)
-#define RIGHT_SERVO_WISE (-1)
-#define WHEEL_RADIUS 0.03f                                  //轮子半径 单位(m)
-#define WHEEL_CICRUMFERENCE (2 * 3.1415926f * WHEEL_RADIUS) //轮子周长 单位(m)
-#define WHEEL_TREAD 0.19                                    //两个轮子之间的距离 单位(m)
-
-    float left_wheel_linear_speed, right_wheel_linear_speed;
-    float left_wheel_rpm, right_wheel_rpm;
-    int16_t left_motor_rpm, right_motor_rpm;
-
-    left_wheel_linear_speed = linear + angular * (WHEEL_TREAD / 2);  //左边轮子的线速度 UNIT:m/min
-    right_wheel_linear_speed = linear - angular * (WHEEL_TREAD / 2); //右边轮子的线速度 UNIT:m/min
-
-    left_wheel_rpm = left_wheel_linear_speed / WHEEL_CICRUMFERENCE;   //左边轮子的转速
-    right_wheel_rpm = right_wheel_linear_speed / WHEEL_CICRUMFERENCE; //右边轮子的转速
-    //左边轮子的转速乘以减速比等于左边伺服电机转速
-    left_motor_rpm = left_wheel_rpm * 10;
-    //右边轮子的转速乘以减速比等于右边伺服电机转速
-    right_motor_rpm = right_wheel_rpm * 10;
-
-    left_motor_rpm *= LEFT_SERVO_WISE;   //设置左边伺服电机转向
-    right_motor_rpm *= RIGHT_SERVO_WISE; //设置右边伺服电机转向
-
-    // 伺服电机的最高转速为300转
-    left_motor_rpm = static_cast<int16_t>(std::clamp(static_cast<float>(left_motor_rpm), -3000.0f, +3000.0f));
-    //伺服电机的最高转速为300转
-    right_motor_rpm = static_cast<int16_t>(std::clamp(static_cast<float>(right_motor_rpm), -3000.0f, +3000.0f));
-
-    return std::make_pair(left_motor_rpm, right_motor_rpm);
 }
 
 void MotionClass::motion_task(void *arg)
@@ -481,25 +487,25 @@ void MotionClass::motion_task(void *arg)
             if (self->_left_motor_state != State::enable)
             {
                 motor_enable(MotorBusID::left);
-                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->_condition.wait_for(lock, std::chrono::milliseconds(kInitResponseWaitMs));
                 self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetEnable);
             }
             else if (self->_left_motor_mode != DriveMode::speed)
             {
                 motor_set_drive_mode(MotorBusID::left, ModeCmd::SetSpeedMode);
-                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->_condition.wait_for(lock, std::chrono::milliseconds(kInitResponseWaitMs));
                 self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetSpeedMode);
             }
             else if (self->_left_motor_disconnect_stop != true)
             {
                 motor_set_disconnect_stop(MotorBusID::left);
-                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->_condition.wait_for(lock, std::chrono::milliseconds(kInitResponseWaitMs));
                 self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::EnableDisConnectStop);
             }
             else if (!self->_left_motor_pid_set)
             {
                 motor_set_pid(MotorBusID::left);
-                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->_condition.wait_for(lock, std::chrono::milliseconds(kInitResponseWaitMs));
                 self->mode_cmd_rx_data_process(MotorBusID::left, ModeCmd::SetPID);
             }
 
@@ -507,25 +513,25 @@ void MotionClass::motion_task(void *arg)
             if (self->_right_motor_state != State::enable)
             {
                 motor_enable(MotorBusID::right);
-                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->_condition.wait_for(lock, std::chrono::milliseconds(kInitResponseWaitMs));
                 self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetEnable);
             }
             else if (self->_right_motor_mode != DriveMode::speed)
             {
                 motor_set_drive_mode(MotorBusID::right, ModeCmd::SetSpeedMode);
-                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->_condition.wait_for(lock, std::chrono::milliseconds(kInitResponseWaitMs));
                 self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetSpeedMode);
             }
             else if (self->_right_motor_disconnect_stop != true)
             {
                 motor_set_disconnect_stop(MotorBusID::right);
-                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->_condition.wait_for(lock, std::chrono::milliseconds(kInitResponseWaitMs));
                 self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::EnableDisConnectStop);
             }
             else if (!self->_right_motor_pid_set)
             {
                 motor_set_pid(MotorBusID::right);
-                self->_condition.wait_for(lock, std::chrono::milliseconds(300));
+                self->_condition.wait_for(lock, std::chrono::milliseconds(kInitResponseWaitMs));
                 self->mode_cmd_rx_data_process(MotorBusID::right, ModeCmd::SetPID);
             }
 
@@ -541,7 +547,7 @@ void MotionClass::motion_task(void *arg)
         else
         {
             uint32_t interval = millis() - self->_last_plan_time;
-            if (interval > 100)
+            if (interval > kPlanIntervalMs)
             {
                 float linear =
                     velocity_planning(self->_linear_speed_cur, self->_linear_speed_set, self->_linear_speed_acc, interval);
@@ -558,13 +564,13 @@ void MotionClass::motion_task(void *arg)
             }
 
             motor_set_speed(MotionClass::MotorBusID::left, self->_left_motor_rpm);
-            self->_condition.wait_for(lock, std::chrono::milliseconds(30));
+            self->_condition.wait_for(lock, std::chrono::milliseconds(kSpeedResponseWaitMs));
             self->speed_set_rx_data_process(MotionClass::MotorBusID::left);
-            vTaskDelay(pdMS_TO_TICKS(5));
+            vTaskDelay(pdMS_TO_TICKS(kMotorCmdGapMs));
             motor_set_speed(MotionClass::MotorBusID::right, self->_right_motor_rpm);
-            self->_condition.wait_for(lock, std::chrono::milliseconds(30));
+            self->_condition.wait_for(lock, std::chrono::milliseconds(kSpeedResponseWaitMs));
             self->speed_set_rx_data_process(MotionClass::MotorBusID::right);
-            vTaskDelay(pdMS_TO_TICKS(5));
+            vTaskDelay(pdMS_TO_TICKS(kMotorCmdGapMs));
         }
     }
 }

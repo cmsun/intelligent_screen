@@ -29,37 +29,37 @@ extern "C" void app_main(void) {
   // SetupMotorID.begin(2);
   // 底盘电机控制（UART1 驱动电机控制板）
   // 手柄遥控必须启动：begin 内部完成电机使能/速度模式/断连保护，并创建控制任务
-  // Motion.begin();
+  Motion.begin();
 
   // XL9535 GPIO 扩展：风扇输出、地面检测输入、头顶/下巴障碍物检测输入
   // begin 内部完成 I2C 初始化、方向配置并创建轮询任务（上报数据需要它持续刷新输入缓存）
-  // if (!Xl9535.begin())
-  // {
-  //   esplog::error("XL9535 init failed");
-  // }
+  if (!Xl9535.begin())
+  {
+    esplog::error("XL9535 init failed");
+  }
 
   // 红外接收：左右两路 HS-S23P（GPIO13 / GPIO14）
   // begin 内部创建两个 RMT 接收通道和 NEC 解码任务，收到有效帧会打印日志
-  // if (!IrReceiver.begin())
-  // {
-  //   esplog::error("IR receiver init failed");
-  // }
+  if (!IrReceiver.begin())
+  {
+    esplog::error("IR receiver init failed");
+  }
 
   // IMU 初始化并启动采样线程（begin 内部创建采样线程）
-  // Imu.begin();
+  Imu.begin();
 
   // 电池管理：begin 内部完成 ADC 初始化、用电压初始化 SOC，并创建周期采样任务
-  // if (!Battery.begin())
-  // {
-  //   esplog::error("Battery init failed");
-  // }
+  if (!Battery.begin())
+  {
+    esplog::error("Battery init failed");
+  }
 
   // 总线舵机（UART2 驱动）：micro-ROS 上报 ServoStatus，接收 ServoCmd 目标角度与转动时间（驱动层限位 0~170 deg）
   BusServo.begin();
 
   // micro-ROS 通信（传输方式由 Kconfig 决定，当前为串口 UART0 / 115200）
   // Agent 重连 + IMU/ServoStatus 发布 + velcmd/servo_cmd 订阅（OrangePi 手柄节点）
-  // RosNode 已在全局构造时绑定 Imu 引用
+  // RosNode 运行时直接读取全局 Imu 实例
   RosNode.begin();
 
   // app_main 到此返回；Imu 为全局实例常驻，Motion/RosNode 各自在独立线程运行。

@@ -19,12 +19,10 @@
 #include <chassis_msgs/msg/xl9535_data.h>
 #include <geometry_msgs/msg/twist.h>
 
-class MPU9250;
-
 class MicroRosNode
 {
 public:
-    explicit MicroRosNode(MPU9250 &imu) : _imu(imu) {}
+    MicroRosNode() = default;
     ~MicroRosNode() = default;
 
     /// 初始化传输层（WiFi 或串口，由 Kconfig 选择）并启动 micro-ROS 通信任务。
@@ -57,8 +55,6 @@ private:
     chassis_msgs__msg__BatteryData _battery_msg{};
     geometry_msgs__msg__Twist _velcmd_msg;
     chassis_msgs__msg__ServoCmd _servo_cmd_msg{};
-    // 引用全局常驻的 IMU 实例（构造函数绑定）
-    MPU9250 &_imu;
 
     // 速度指令看门狗：订阅回调写入最后收到时刻，micro_ros_task 超时后自动停车
     std::atomic<int64_t> _last_velcmd_us{0};
