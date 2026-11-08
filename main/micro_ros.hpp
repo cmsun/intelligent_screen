@@ -18,6 +18,7 @@
 #include <chassis_msgs/msg/servo_status.h>
 #include <chassis_msgs/msg/xl9535_data.h>
 #include <geometry_msgs/msg/twist.h>
+#include <std_msgs/msg/float32.h>
 
 class MicroRosNode
 {
@@ -47,6 +48,7 @@ private:
     rcl_publisher_t _battery_publisher{};
     rcl_subscription_t _velcmd_subscription{};
     rcl_subscription_t _servo_cmd_subscription{};
+    rcl_subscription_t _battery_offset_subscription{};
     chassis_msgs__msg__ImuData _imu_msg{};
     chassis_msgs__msg__ServoStatus _servo_status_msg{};
     chassis_msgs__msg__Xl9535Data _xl9535_msg{};
@@ -55,6 +57,7 @@ private:
     chassis_msgs__msg__BatteryData _battery_msg{};
     geometry_msgs__msg__Twist _velcmd_msg;
     chassis_msgs__msg__ServoCmd _servo_cmd_msg{};
+    std_msgs__msg__Float32 _battery_offset_msg{};
 
     // 速度指令看门狗：订阅回调写入最后收到时刻，micro_ros_task 超时后自动停车
     std::atomic<int64_t> _last_velcmd_us{0};
@@ -67,6 +70,7 @@ private:
     void servo_status_publish(void);
     static void velcmd_subscribe_callback(const void *arg);
     static void servo_cmd_subscribe_callback(const void *arg);
+    static void battery_offset_subscribe_callback(const void *arg);
     static void micro_ros_task(void *arg);
 };
 

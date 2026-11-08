@@ -27,6 +27,7 @@ namespace
 // 订阅：
 //   chassis_msgs/velcmd         geometry_msgs/Twist     linear.x [m/s]、angular.z [rad/s]
 //   chassis_msgs/servo_cmd      chassis_msgs/ServoCmd  angle_deg [deg]、move_time_ms [ms]
+//   chassis_msgs/battery_current_offset  std_msgs/Float32  data [A]，设置电流零漂并保存到 NVS
 // 发布（均由 ESP32 周期上报）：
 //   chassis_msgs/imu            chassis_msgs/ImuData       欧拉角 + yaw 角速度
 //   chassis_msgs/servo_status   chassis_msgs/ServoStatus   舵机位置/电压
@@ -179,12 +180,19 @@ rcl_ret_t MicroRosNode::create_entities(void)
                                            ROSIDL_GET_MSG_TYPE_SUPPORT(chassis_msgs, msg, ServoCmd),
                                            "chassis_msgs/servo_cmd"));
 
-    // 2 个订阅 + 余量
-    RCCHECK(rclc_executor_init(&_executor, &_support.context, 4, &_allocator));
+    // 订阅电流零漂标定值（上位机用万用表标定后下发，ESP32 收到即写入 NVS）
+    RCCHECK(rclc_subscription_init_default(&_battery_offset_subscription, &_node,
+                                           ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+                                           "chassis_msgs/battery_current_offset"));
+
+    // 3 个订阅 + 余量
+    RCCHECK(rclc_executor_init(&_executor, &_support.context, 5, &_allocator));
     RCCHECK(rclc_executor_add_subscription(&_executor, &_velcmd_subscription, &_velcmd_msg,
                                            &velcmd_subscribe_callback, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_subscription(&_executor, &_servo_cmd_subscription, &_servo_cmd_msg,
                                            &servo_cmd_subscribe_callback, ON_NEW_DATA));
+    RCCHECK(rclc_executor_add_subscription(&_executor, &_battery_offset_subscription, &_battery_offset_msg,
+                                           &battery_offset_subscribe_callback, ON_NEW_DATA));
 
     return RCL_RET_OK;
 }
@@ -238,6 +246,12 @@ void MicroRosNode::destroy_entities(void)
     if (ret != RCL_RET_OK)
     {
         esplog::warn("servo cmd subscription fini failed: {}", static_cast<int>(ret));
+    }
+
+    ret = rcl_subscription_fini(&_battery_offset_subscription, &_node);
+    if (ret != RCL_RET_OK)
+    {
+        esplog::warn("battery offset subscription fini failed: {}", static_cast<int>(ret));
     }
 
     ret = rcl_node_fini(&_node);
@@ -317,6 +331,8 @@ void MicroRosNode::battery_publish(void)
     _battery_msg.soc = battery.soc;
     _battery_msg.state = static_cast<uint8_t>(battery.state);
     _battery_msg.charge_enabled = battery.charge_enabled;
+    // 回读本板当前生效的零漂值，供上位机标定流程判断是否已清零/已保存
+    _battery_msg.current_offset = Battery.current_offset();
     publish_msg(_battery_publisher, _battery_msg, "battery");
 }
 
@@ -356,6 +372,19 @@ void MicroRosNode::servo_cmd_subscribe_callback(const void *arg)
     {
         esplog::warn("bus servo move to {} deg in {} ms failed", angle_deg, move_time_ms);
     }
+}
+
+void MicroRosNode::battery_offset_subscribe_callback(const void *arg)
+{
+    const auto *msg = static_cast<const std_msgs__msg__Float32 *>(arg);
+    const float offset_a = msg->data;
+    // set_current_offset 会校验 NaN/Inf 并写入 NVS；成功后下一帧 BatteryData 回读新值
+    if (!Battery.set_current_offset(offset_a))
+    {
+        esplog::error("set battery current offset {} A failed", offset_a);
+        return;
+    }
+    esplog::info("battery current offset set to {} A (saved to NVS)", offset_a);
 }
 
 void MicroRosNode::micro_ros_task(void *arg)

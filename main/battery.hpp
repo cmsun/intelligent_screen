@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <ostream>
 
@@ -92,6 +93,10 @@ public:
     float battery_voltage(void) const;
     float charger_voltage(void) const;
     float current(void) const;
+    // 电流零漂（A）：叠加到「换算并取反后」的电流上，保存在 NVS，掉电不丢
+    float current_offset(void) const;
+    // 设置零漂并写入 NVS；非法值（NaN/Inf）或写 NVS 失败时返回 false
+    bool set_current_offset(float offset_a);
     float soc(void) const;
     State state(void) const;
     friend std::ostream &operator<<(std::ostream &os, const BatteryClass &b);
@@ -116,6 +121,8 @@ private:
     int64_t _last_update_us = 0;   // 上次积分时间戳（us）
     uint32_t _log_acc_ms = 0;      // 日志打印计时
     bool _is_full = false;         // 充满标志，充电器拔除后清除
+    // 由 micro-ROS 订阅任务写入、battery_task 读取，用原子量避免跨任务数据竞争
+    std::atomic<float> _current_offset{0.0f}; // A，逐板标定的电流零漂
     static void battery_task(void *arg);
 };
 

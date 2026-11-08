@@ -10,10 +10,53 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <nvs.h>
 
 #include "esplog.hpp"
 
 BatteryClass Battery;
+
+namespace
+{
+// 电流零漂按板单独标定后存入 NVS，掉电不丢；命名空间与键名不要随意改动
+constexpr char kNvsNamespace[] = "bms";
+constexpr char kNvsKeyCurrentOffset[] = "curr_offset";
+
+float load_current_offset(void)
+{
+    nvs_handle_t handle = 0;
+    if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) != ESP_OK)
+    {
+        return 0.0f;
+    }
+    float value = 0.0f;
+    size_t len = sizeof(value);
+    const esp_err_t err = nvs_get_blob(handle, kNvsKeyCurrentOffset, &value, &len);
+    nvs_close(handle);
+    // 未标定过、长度异常或存了 NaN/Inf，一律按 0 处理
+    if (err != ESP_OK || len != sizeof(value) || !std::isfinite(value))
+    {
+        return 0.0f;
+    }
+    return value;
+}
+
+bool save_current_offset(float value)
+{
+    nvs_handle_t handle = 0;
+    if (nvs_open(kNvsNamespace, NVS_READWRITE, &handle) != ESP_OK)
+    {
+        return false;
+    }
+    esp_err_t err = nvs_set_blob(handle, kNvsKeyCurrentOffset, &value, sizeof(value));
+    if (err == ESP_OK)
+    {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err == ESP_OK;
+}
+} // namespace
 
 // ADC 校准句柄（按通道各创建一个，失败则退回线性换算）
 static adc_cali_handle_t s_cali_bat_volt = nullptr;
@@ -65,6 +108,9 @@ bool BatteryClass::begin(const Config &config)
 {
     _config = config;
     _is_ready = false;
+    // 开机从 NVS 恢复本板标定值；首次烧录未标定过时为 0
+    _current_offset.store(load_current_offset(), std::memory_order_relaxed);
+    esplog::info("bms current offset from NVS: {} A", _current_offset.load(std::memory_order_relaxed));
 
     // 1. 充电使能管脚：默认关闭充电
     gpio_config_t en_cfg = {
@@ -275,12 +321,13 @@ void BatteryClass::update(void)
     }
     // 3. 电流：I = (Vout - Vref) / (gain * Rsense)
     // 硬件极性相反：放电时换算值为正、充电时为负；取反统一为「充电为正、放电为负」，
-    // 以便安时积分、充放电状态判定、功率与上报值都使用同一套符号约定
+    // 以便安时积分、充放电状态判定、功率与上报值都使用同一套符号约定。
+    // 最后叠加逐板标定的零漂值（从 NVS 读取），得到上报与积分用的最终电流
     if (read_channel(_bat_curr_chan, mv))
     {
         const float vout = mv / 1000.0f;
         const float sensed = (vout - _config.ina_v_ref) / (_config.ina_gain * _config.ina_r_sense);
-        _status.current = -1.0f * sensed;
+        _status.current = -1.0f * sensed + _current_offset.load(std::memory_order_relaxed);
     }
     _status.power = _status.battery_voltage * _status.current;
 
@@ -395,6 +442,29 @@ float BatteryClass::current(void) const
     return _status.current;
 }
 
+float BatteryClass::current_offset(void) const
+{
+    return _current_offset.load(std::memory_order_relaxed);
+}
+
+bool BatteryClass::set_current_offset(float offset_a)
+{
+    // 拒绝 NaN/Inf：否则会污染电流、SOC 积分，还会把坏值写进 NVS
+    if (!std::isfinite(offset_a))
+    {
+        esplog::error("invalid battery current offset");
+        return false;
+    }
+    // 先写 NVS 再更新内存：写失败时不改变当前生效值，避免「显示已改但掉电丢失」
+    if (!save_current_offset(offset_a))
+    {
+        esplog::error("save battery current offset to NVS failed");
+        return false;
+    }
+    _current_offset.store(offset_a, std::memory_order_relaxed);
+    return true;
+}
+
 float BatteryClass::soc(void) const
 {
     return _status.soc;
@@ -414,7 +484,8 @@ std::ostream &operator<<(std::ostream &os, const BatteryClass &b)
        << "power " << s.power << "W, "
        << "soc " << s.soc << "%, "
        << "charge_en " << (s.charge_enabled ? "on" : "off") << ", "
-       << "state " << s.state;
+       << "state " << s.state << ", "
+       << "current_offset " << b._current_offset.load(std::memory_order_relaxed) << "A";
     return os;
 }
 

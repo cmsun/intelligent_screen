@@ -8,10 +8,24 @@
 #include "setup_motor_id.hpp"
 #include "xl9535.hpp"
 
+#include <esp_err.h>
 #include <esp_task_wdt.h>
+#include <nvs_flash.h>
 
 extern "C" void app_main(void) {
   esplog::init(esplog::level::debug);
+
+  // 电流零漂标定值存放在 NVS，需在所有模块 begin() 之前初始化 NVS 分区
+  esp_err_t nvs_err = nvs_flash_init();
+  if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES ||
+      nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    // 分区满或版本升级：擦除后重试（会清掉已标定的零漂值，需重新标定）
+    nvs_flash_erase();
+    nvs_err = nvs_flash_init();
+  }
+  if (nvs_err != ESP_OK) {
+    esplog::error("NVS init failed: {}", static_cast<int>(nvs_err));
+  }
 
   // 初始化任务看门狗（超时 3 秒，超时触发 panic）
   // 注意：不要 esp_task_wdt_add(NULL) 把 main 任务加入监控，
