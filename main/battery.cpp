@@ -131,8 +131,8 @@ bool BatteryClass::begin(const Config &config)
     // 先采样一次，用开路电压初始化当前电量
     update();
 
-    // 创建采样任务：周期采样并更新 SOC
-    if (xTaskCreate(battery_task, "battery_task", _config.task_stack, nullptr, 4, nullptr) != pdPASS)
+    // 创建采样任务：周期采样并更新 SOC；把当前实例作为任务参数传入
+    if (xTaskCreate(battery_task, "battery_task", _config.task_stack, this, 4, nullptr) != pdPASS)
     {
         esplog::error("battery task create failed");
         return false;
@@ -142,24 +142,18 @@ bool BatteryClass::begin(const Config &config)
 
 void BatteryClass::battery_task(void *arg)
 {
+    auto self = static_cast<BatteryClass *>(arg);
     while (true)
     {
-        Battery.update();
-        Battery._log_acc_ms += Battery._config.sample_period_ms;
-        if (Battery._log_acc_ms >= Battery._config.log_period_ms)
+        self->update();
+        self->_log_acc_ms += self->_config.sample_period_ms;
+        if (self->_log_acc_ms >= self->_config.log_period_ms)
         {
-            Battery._log_acc_ms = 0;
-            Battery.log_status();
+            self->_log_acc_ms = 0;
+            esplog::debug("{}", *self);
         }
-        vTaskDelay(pdMS_TO_TICKS(Battery._config.sample_period_ms));
+        vTaskDelay(pdMS_TO_TICKS(self->_config.sample_period_ms));
     }
-}
-
-void BatteryClass::log_status(void)
-{
-    esplog::debug("battery {:.2f}V, charger {:.2f}V, current {:+.2f}A, power {:+.1f}W, soc {:.1f}%, charge_en {}, state {}",
-                  _status.battery_voltage, _status.charger_voltage, _status.current,
-                  _status.power, _status.soc, _status.charge_enabled ? "on" : "off", _status.state);
 }
 
 // 读取一次 ADC 并换算为毫伏，失败返回 false
@@ -284,7 +278,6 @@ void BatteryClass::update(void)
     {
         const float vout = mv / 1000.0f;
         _status.current = (vout - _config.ina_v_ref) / (_config.ina_gain * _config.ina_r_sense);
-        esplog::error("vout:{} current: {}", vout, _status.current);
     }
     _status.power = _status.battery_voltage * _status.current;
 

@@ -1,9 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <ostream>
 
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
+
+// fmtlib 自定义类型的字符串格式化需包含 <fmt/ostream.h>
+#include <fmt/ostream.h>
 
 ///
 /// XL9535 16 位 I2C GPIO 扩展芯片驱动（与 PCA9535 寄存器兼容）
@@ -85,8 +89,6 @@ public:
     bool head_up_obstacle(void) const;
     bool head_down_obstacle(void) const;
     bool int_active(void) const;
-    void print_status(void) const;
-
 private:
     bool read_reg(uint8_t reg, uint8_t &value) const;
     bool write_reg(uint8_t reg, uint8_t value) const;
@@ -106,3 +108,8 @@ private:
 };
 
 extern Xl9535Class Xl9535;
+
+std::ostream &operator<<(std::ostream &os, const Xl9535Class &x);
+
+// fmt v11 不再隐式使用 operator<< 作为兜底，需显式继承 ostream_formatter
+template <> struct fmt::formatter<Xl9535Class> : fmt::ostream_formatter {};

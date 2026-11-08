@@ -120,7 +120,6 @@ private:
     uint32_t _log_acc_ms = 0;      // 日志打印计时
     bool _is_full = false;         // 充满标志，充电器拔除后清除
     static void battery_task(void *arg);
-    void log_status(void);
 };
 
 constexpr std::ostream &operator<<(std::ostream &os, const BatteryClass::State &state)

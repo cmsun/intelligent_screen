@@ -247,9 +247,9 @@ void IrReceiverClass::on_frame(const RxEvent &event)
 
     if (_cfg.log_frames)
     {
-        esplog::info("ir {} code=0x{:08X} addr=0x{:02X} cmd=0x{:02X}{}",
-                     side_name(side), frame.raw_code, frame.address, frame.command,
-                     frame.repeat ? " repeat" : "");
+        esplog::debug("ir {} code=0x{:08X} addr=0x{:02X} cmd=0x{:02X}{}",
+                      side_name(side), frame.raw_code, frame.address, frame.command,
+                      frame.repeat ? " repeat" : "");
     }
 }
 

@@ -119,10 +119,10 @@ bool Xl9535Class::begin(const Config &config)
                  _config.device_address, static_cast<int>(_config.scl_pin),
                  static_cast<int>(_config.sda_pin), static_cast<int>(_config.int_pin));
 
-    print_status();
+    esplog::info("{}", *this);
 
-    // 创建轮询任务：周期刷新输入并在状态变化时打印日志
-    if (xTaskCreate(task, "xl9535_task", 1024 * 5, nullptr, 4, nullptr) != pdPASS)
+    // 创建轮询任务：周期刷新输入并在状态变化时打印日志；把当前实例作为任务参数传入
+    if (xTaskCreate(task, "xl9535_task", 1024 * 5, this, 4, nullptr) != pdPASS)
     {
         esplog::error("xl9535 task create failed");
         return false;
@@ -267,32 +267,33 @@ bool Xl9535Class::int_active(void) const
     return gpio_get_level(_config.int_pin) == 0;
 }
 
-void Xl9535Class::print_status(void) const
-{
-    esplog::info("floor left {} left-mid {} right-mid {} right {}, obstacle up {} down {}, fan {}",
-                 floor_detected(0) ? "detected" : "lost",
-                 floor_detected(1) ? "detected" : "lost",
-                 floor_detected(2) ? "detected" : "lost",
-                 floor_detected(3) ? "detected" : "lost",
-                 head_up_obstacle() ? "triggered" : "idle",
-                 head_down_obstacle() ? "triggered" : "idle",
-                 _fan_level ? "on" : "off");
-}
-
 void Xl9535Class::task(void *arg)
 {
+    auto self = static_cast<Xl9535Class *>(arg);
     while (true)
     {
-        Xl9535.refresh();
+        self->refresh();
         // 输入端口有变化时才打印日志，避免刷屏
-        if (!Xl9535._first_refresh &&
-            (Xl9535._input0 != Xl9535._last_input0 || Xl9535._input1 != Xl9535._last_input1))
+        if (!self->_first_refresh &&
+            (self->_input0 != self->_last_input0 || self->_input1 != self->_last_input1))
         {
-            Xl9535.print_status();
+            esplog::debug("{}", *self);
         }
-        Xl9535._first_refresh = false;
-        Xl9535._last_input0 = Xl9535._input0;
-        Xl9535._last_input1 = Xl9535._input1;
-        vTaskDelay(pdMS_TO_TICKS(Xl9535._config.poll_period_ms));
+        self->_first_refresh = false;
+        self->_last_input0 = self->_input0;
+        self->_last_input1 = self->_input1;
+        vTaskDelay(pdMS_TO_TICKS(self->_config.poll_period_ms));
     }
+}
+
+std::ostream &operator<<(std::ostream &os, const Xl9535Class &x)
+{
+    os << "floor left " << (x.floor_detected(0) ? "detected" : "lost")
+       << " left-mid " << (x.floor_detected(1) ? "detected" : "lost")
+       << " right-mid " << (x.floor_detected(2) ? "detected" : "lost")
+       << " right " << (x.floor_detected(3) ? "detected" : "lost")
+       << ", obstacle up " << (x.head_up_obstacle() ? "triggered" : "idle")
+       << " down " << (x.head_down_obstacle() ? "triggered" : "idle")
+       << ", fan " << (x.fan_on() ? "on" : "off");
+    return os;
 }
