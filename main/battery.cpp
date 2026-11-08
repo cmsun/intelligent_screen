@@ -273,11 +273,14 @@ void BatteryClass::update(void)
         const float ratio = _config.charg_divider_low / (_config.charg_divider_up + _config.charg_divider_low);
         _status.charger_voltage = (mv / 1000.0f) / ratio;
     }
-    // 3. 电流：I = (Vout - Vref) / (gain * Rsense)，正为充电
+    // 3. 电流：I = (Vout - Vref) / (gain * Rsense)
+    // 硬件极性相反：放电时换算值为正、充电时为负；取反统一为「充电为正、放电为负」，
+    // 以便安时积分、充放电状态判定、功率与上报值都使用同一套符号约定
     if (read_channel(_bat_curr_chan, mv))
     {
         const float vout = mv / 1000.0f;
-        _status.current = (vout - _config.ina_v_ref) / (_config.ina_gain * _config.ina_r_sense);
+        const float sensed = (vout - _config.ina_v_ref) / (_config.ina_gain * _config.ina_r_sense);
+        _status.current = -1.0f * sensed;
     }
     _status.power = _status.battery_voltage * _status.current;
 
@@ -319,10 +322,8 @@ void BatteryClass::update_state(void)
         return;
     }
 
-    // 2. 充满判定：充电使能 && (电压 >= 29V || (电压 >= 28V && 充电电流 < 0.5A))
-    if (!_is_full && _status.charge_enabled &&
-        (volt >= _config.full_voltage ||
-         (volt >= _config.full_voltage_min && cur < _config.full_current_max)))
+    // 2. 充满判定：充电使能 && 电压 >= full_voltage
+    if (!_is_full && _status.charge_enabled && volt >= _config.full_voltage)
     {
         _is_full = true;
         esplog::info("battery full: {:.2f}V, current {:+.2f}A", volt, cur);

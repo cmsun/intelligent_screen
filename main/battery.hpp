@@ -50,11 +50,8 @@ public:
         // 安时积分（库仑计）参数
         float capacity_ah = 6.0f;          // Ah，电池额定容量
         float soc_integral_max = 99.0f;    // %，积分上限，剩余部分由电压判定充满
-        // 充满判定：充电使能 && (电压 >= full_voltage ||
-        //                       (电压 >= full_voltage_min && 充电电流 < full_current_max))
-        float full_voltage = 29.0f;        // V，直接判定充满的电压
-        float full_voltage_min = 28.0f;    // V，配合小电流判定充满的电压
-        float full_current_max = 0.5f;     // A，判定充满的电流阈值
+        // 充满判定：充电使能 && 电压 >= full_voltage
+        float full_voltage = 29.0f; // V，判定充满的电压
         float idle_current = 0.2f;         // A，|I| 小于该值视为静置（充放电判定用）
         // 充电器在位判定：充电器电压 >= 该值认为充电器接入
         float charger_present_v = 19.0f;   // V
