@@ -5,6 +5,7 @@
 #include <freertos/task.h>
 
 #include "esplog.hpp"
+#include "motion.hpp"
 
 Xl9535Class Xl9535;
 
@@ -173,8 +174,10 @@ bool Xl9535Class::refresh(void)
         esplog::error("xl9535 read input failed: {}", esp_err_to_name(err));
         return false;
     }
-    _input0 = buf[0];
-    _input1 = buf[1];
+    _input0.store(buf[0], std::memory_order_relaxed);
+    _input1.store(buf[1], std::memory_order_relaxed);
+    // 四路地检状态一次性发布为一致快照，避免速度回调读到半刷新状态
+    _floor_lost_mask.store(floor_lost_mask_from_cache(), std::memory_order_release);
     return true;
 }
 
@@ -204,7 +207,8 @@ bool Xl9535Class::set_pin(Pin pin, bool level)
 
 bool Xl9535Class::read_pin(Pin pin, bool &level) const
 {
-    const uint8_t value = pin_port(pin) == 0 ? _input0 : _input1;
+    const uint8_t value = pin_port(pin) == 0 ? _input0.load(std::memory_order_relaxed)
+                                             : _input1.load(std::memory_order_relaxed);
     level = (value & pin_mask(pin)) != 0;
     return true;
 }
@@ -248,18 +252,42 @@ bool Xl9535Class::floor_detected(uint8_t index) const
         return false;
     }
     bool level = false;
-    return read_pin(pin, level) && level;
+    if (!read_pin(pin, level))
+    {
+        return false;
+    }
+    // 地检低电平有效：0 = detected（有地面），1 = lost（悬空）
+    return !level;
+}
+
+uint8_t Xl9535Class::floor_lost_mask_from_cache(void) const
+{
+    // !floor_detected() 即读到高电平（lost/悬空），置位表示该路需要防跌落保护
+    uint8_t mask = 0;
+    for (uint8_t index = 0; index < 4; ++index)
+    {
+        if (!floor_detected(index))
+        {
+            mask = static_cast<uint8_t>(mask | (1u << index));
+        }
+    }
+    return mask;
+}
+
+uint8_t Xl9535Class::floor_lost_mask(void) const
+{
+    return _floor_lost_mask.load(std::memory_order_acquire);
 }
 
 // 头顶/下巴障碍物检测信号为低电平有效，读到 0 表示检测到障碍物
 bool Xl9535Class::head_up_obstacle(void) const
 {
-    return (_input0 & pin_mask(head_up_obstacle_pin)) == 0;
+    return (_input0.load(std::memory_order_relaxed) & pin_mask(head_up_obstacle_pin)) == 0;
 }
 
 bool Xl9535Class::head_down_obstacle(void) const
 {
-    return (_input0 & pin_mask(head_down_obstacle_pin)) == 0;
+    return (_input0.load(std::memory_order_relaxed) & pin_mask(head_down_obstacle_pin)) == 0;
 }
 
 bool Xl9535Class::int_active(void) const
@@ -270,18 +298,31 @@ bool Xl9535Class::int_active(void) const
 void Xl9535Class::task(void *arg)
 {
     auto self = static_cast<Xl9535Class *>(arg);
+    uint8_t last_lost_mask = 0;
     while (true)
     {
         self->refresh();
+        const uint8_t input0 = self->_input0.load(std::memory_order_relaxed);
+        const uint8_t input1 = self->_input1.load(std::memory_order_relaxed);
         // 输入端口有变化时才打印日志，避免刷屏
         if (!self->_first_refresh &&
-            (self->_input0 != self->_last_input0 || self->_input1 != self->_last_input1))
+            (input0 != self->_last_input0 || input1 != self->_last_input1))
         {
             esplog::debug("{}", *self);
         }
         self->_first_refresh = false;
-        self->_last_input0 = self->_input0;
-        self->_last_input1 = self->_input1;
+        self->_last_input0 = input0;
+        self->_last_input1 = input1;
+
+        // 地检新出现悬空（或悬空组合变化）的瞬间立即清零速度目标，
+        // 不能等下一条 velcmd，否则设备会沿用上一条指令继续朝边缘行驶。
+        const uint8_t lost_mask = self->floor_lost_mask();
+        if (lost_mask != 0 && lost_mask != last_lost_mask)
+        {
+            Motion.set_chassis_speed(0.0f, 0.0f);
+            esplog::warn("floor lost mask 0x{:02X}, chassis stopped", lost_mask);
+        }
+        last_lost_mask = lost_mask;
         vTaskDelay(pdMS_TO_TICKS(self->_config.poll_period_ms));
     }
 }

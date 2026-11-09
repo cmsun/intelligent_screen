@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <ostream>
 
@@ -83,8 +84,17 @@ public:
     // 风扇控制
     bool set_fan(bool on);
     bool fan_on(void) const;
-    // 地面检测：index 0=左 1=左中 2=右中 3=右，高电平表示检测到地面
+    // 地面检测：index 0=左 1=左中 2=右中 3=右；信号低电平有效，
+    // 读到 0 = detected（检测到地面），读到 1 = lost（悬空，触发防跌落保护）
     bool floor_detected(uint8_t index) const;
+    // 四路地检悬空位掩码：置 1 表示该路 floor_detected()==false（悬空，触发防跌落保护）
+    static constexpr uint8_t kFloorLostLeft = 1u << 0;
+    static constexpr uint8_t kFloorLostLeftMiddle = 1u << 1;
+    static constexpr uint8_t kFloorLostRightMiddle = 1u << 2;
+    static constexpr uint8_t kFloorLostRight = 1u << 3;
+    static constexpr uint8_t kFloorLostAll = 0x0F;
+    // 当前悬空快照，由轮询任务在每次 refresh() 后原子发布，供速度指令过滤读取
+    uint8_t floor_lost_mask(void) const;
     // 头顶/下巴障碍物检测，低电平有效，返回 true 表示检测到障碍物（触发对应方向保护）
     bool head_up_obstacle(void) const;
     bool head_down_obstacle(void) const;
@@ -93,14 +103,18 @@ private:
     bool read_reg(uint8_t reg, uint8_t &value) const;
     bool write_reg(uint8_t reg, uint8_t value) const;
     bool apply_direction(void) const;
+    // 由当前输入缓存计算四路悬空掩码，只在 refresh() 中调用
+    uint8_t floor_lost_mask_from_cache(void) const;
     static void task(void *arg);
 
     bool _is_ready = false;
     Config _config;
     i2c_master_bus_handle_t _bus = nullptr;
     i2c_master_dev_handle_t _dev = nullptr;
-    uint8_t _input0 = 0;
-    uint8_t _input1 = 0;
+    std::atomic<uint8_t> _input0{0};
+    std::atomic<uint8_t> _input1{0};
+    // 初值按"全部悬空"处理：I2C 尚未就绪或刷新失败时保守禁止前进
+    std::atomic<uint8_t> _floor_lost_mask{kFloorLostAll};
     bool _fan_level = false;
     uint8_t _last_input0 = 0;
     uint8_t _last_input1 = 0;

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 
 #include <esp_task_wdt.h>
 #include <esp_timer.h>
@@ -54,6 +55,39 @@ void publish_msg(const rcl_publisher_t &publisher, const Msg &msg, const char *n
     if (ret != RCL_RET_OK)
     {
         esplog::warn("{} publish failed: {}", name, static_cast<int>(ret));
+    }
+}
+
+// 地检防跌落：地检信号低电平有效（0 = 有地面 detected，1 = 悬空 lost），
+// floor_lost_mask() 中置 1 表示该路悬空（触发保护）。
+// 按分量钳制，只把违规分量置 0，合法分量原样保留，不做整条指令作废：
+//   任一路触发  : linear  > 0 -> 0
+//   左/左中触发 : angular > 0 -> 0
+//   右/右中触发 : angular < 0 -> 0
+// 左右两侧同时触发时两条角速度规则叠加，angular 恒为 0。
+void floor_guard_clamp(float &linear, float &angular, uint8_t &lost_mask)
+{
+    lost_mask = Xl9535.floor_lost_mask();
+    if (lost_mask == 0)
+    {
+        return;
+    }
+    if (linear > 0.0f)
+    {
+        linear = 0.0f;
+    }
+
+    constexpr uint8_t kLeftSide = static_cast<uint8_t>(Xl9535Class::kFloorLostLeft |
+                                                        Xl9535Class::kFloorLostLeftMiddle);
+    constexpr uint8_t kRightSide = static_cast<uint8_t>(Xl9535Class::kFloorLostRightMiddle |
+                                                         Xl9535Class::kFloorLostRight);
+    if ((lost_mask & kLeftSide) != 0 && angular > 0.0f)
+    {
+        angular = 0.0f;
+    }
+    if ((lost_mask & kRightSide) != 0 && angular < 0.0f)
+    {
+        angular = 0.0f;
     }
 }
 } // namespace
@@ -346,9 +380,34 @@ void MicroRosNode::velcmd_subscribe_callback(const void *arg)
     const auto *msg = static_cast<const geometry_msgs__msg__Twist *>(arg);
 
     // MotionClass::set_chassis_speed() 与 Twist 同为 SI 单位（m/s、rad/s），
-    // 单位换算在 MotionClass 内部完成，这里只做限幅后直接下发。
-    const float linear = std::clamp(static_cast<float>(msg->linear.x), -kMaxLinearMps, kMaxLinearMps);
-    const float angular = std::clamp(static_cast<float>(msg->angular.z), -kMaxAngularRps, kMaxAngularRps);
+    // 单位换算在 MotionClass 内部完成，这里只做限幅 + 地检防跌落钳制后下发。
+    float linear = std::clamp(static_cast<float>(msg->linear.x), -kMaxLinearMps, kMaxLinearMps);
+    float angular = std::clamp(static_cast<float>(msg->angular.z), -kMaxAngularRps, kMaxAngularRps);
+    const float raw_linear = linear;
+    const float raw_angular = angular;
+
+    // 逐分量钳制：只把违规分量置 0，合法分量原样保留；NaN/Inf 整条置 0 兜底。
+    uint8_t lost_mask = 0;
+    floor_guard_clamp(linear, angular, lost_mask);
+    if (!std::isfinite(linear) || !std::isfinite(angular))
+    {
+        linear = 0.0f;
+        angular = 0.0f;
+    }
+
+    if (linear != raw_linear || angular != raw_angular)
+    {
+        // 钳制日志按 1s 节流，避免 20Hz 指令刷屏
+        static int64_t last_clamp_log_us = 0;
+        const int64_t now_us = esp_timer_get_time();
+        if (now_us - last_clamp_log_us >= 1000LL * 1000)
+        {
+            last_clamp_log_us = now_us;
+            esplog::warn("floor guard clamp (lost 0x{:02X}): ({}, {}) -> ({}, {})",
+                         lost_mask, raw_linear, raw_angular, linear, angular);
+        }
+    }
+
     Motion.set_chassis_speed(linear, angular);
 
     // 刷新看门狗时间戳，供 micro_ros_task 判断上位机是否还在持续下发
