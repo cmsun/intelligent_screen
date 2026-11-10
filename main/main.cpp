@@ -2,6 +2,7 @@
 #include "bus_servo.hpp"
 #include "esplog.hpp"
 #include "ir_receiver.hpp"
+#include "led.hpp"
 #include "micro_ros.hpp"
 #include "motion.hpp"
 #include "mpu9250.hpp"
@@ -10,9 +11,23 @@
 
 #include <esp_err.h>
 #include <esp_task_wdt.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <nvs_flash.h>
 
 extern "C" void app_main(void) {
+  // 初始化任务看门狗（超时 3 秒，超时触发 panic）
+  // 注意：不要 esp_task_wdt_add(NULL) 把 main 任务加入监控：app_main 末尾改为常驻循环，
+  // 但未被 add 的任务不受 task WDT 约束，循环内 vTaskDelay 会正常让出 CPU。
+  // 各常驻任务（imu_sample / motion_task / micro_ros_task）在各自线程内
+  // 自行 esp_task_wdt_add + esp_task_wdt_reset 管理。
+  // esp_task_wdt_config_t wdt_cfg = {
+  //     .timeout_ms = 3000,      // 3 秒超时
+  //     .idle_core_mask = 0,     // 不监控 idle 任务
+  //     .trigger_panic = true,   // 超时时触发 panic
+  // };
+  // esp_task_wdt_init(&wdt_cfg);
+
   esplog::init(esplog::level::debug);
 
   // 电流零漂标定值存放在 NVS，需在所有模块 begin() 之前初始化 NVS 分区
@@ -26,18 +41,6 @@ extern "C" void app_main(void) {
   if (nvs_err != ESP_OK) {
     esplog::error("NVS init failed: {}", static_cast<int>(nvs_err));
   }
-
-  // 初始化任务看门狗（超时 3 秒，超时触发 panic）
-  // 注意：不要 esp_task_wdt_add(NULL) 把 main 任务加入监控，
-  // 因为 app_main 马上返回、main 任务退出，不会再喂狗，会误触发看门狗。
-  // 各常驻任务（imu_sample / motion_task / micro_ros_task）在各自线程内
-  // 自行 esp_task_wdt_add + esp_task_wdt_reset 管理。
-  // esp_task_wdt_config_t wdt_cfg = {
-  //     .timeout_ms = 3000,      // 3 秒超时
-  //     .idle_core_mask = 0,     // 不监控 idle 任务
-  //     .trigger_panic = true,   // 超时时触发 panic
-  // };
-  // esp_task_wdt_init(&wdt_cfg);
 
   // 设置电机控制板的ID
   // SetupMotorID.begin(2);
@@ -76,5 +79,25 @@ extern "C" void app_main(void) {
   // RosNode 运行时直接读取全局 Imu 实例
   RosNode.begin();
 
-  // app_main 到此返回；Imu 为全局实例常驻，Motion/RosNode 各自在独立线程运行。
+  // app_main 不再返回：每 1s 依据电池充放电状态设置 LED 闪烁节奏。
+  // 放电：亮 100ms / 灭 900ms（慢闪）；充电：亮 100ms / 灭 100ms（快闪）。
+  // led_start_blink() 在闪烁线程已存在时只更新时长，不会重复创建线程。
+  BatteryClass::State last_state = BatteryClass::State::idle;
+  while (true)
+  {
+    const BatteryClass::State state = Battery.state();
+    if (state != last_state)
+    {
+      if (state == BatteryClass::State::charging)
+      {
+        Led.led_start_blink(50, 50);
+      }
+      else
+      {
+        Led.led_start_blink(50, 950);
+      }
+      last_state = state;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
 }

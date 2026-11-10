@@ -396,13 +396,6 @@ void BatteryClass::update_state(void)
     {
         _soc_integral = 0.0f;
     }
-    if (cell_v <= _config.cell_low_warn_v)
-    {
-        _status.state = State::low_battery;
-        // 充电器在位时才允许充电
-        set_charge_enable(charger_on);
-        return;
-    }
 
     // 4. 充电器在位且未充满则使能充电，拔除充电器则失能充电
     set_charge_enable(charger_on);
@@ -419,6 +412,11 @@ void BatteryClass::update_state(void)
     else
     {
         _status.state = State::idle;
+    }
+
+    if (_status.state != State::charging && cell_v <= _config.cell_low_warn_v)
+    {
+        _status.state = State::low_battery;
     }
 }
 
