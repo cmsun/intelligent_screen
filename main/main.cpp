@@ -3,9 +3,9 @@
 #include "esplog.hpp"
 #include "ir_receiver.hpp"
 #include "led.hpp"
-#include "micro_ros.hpp"
 #include "motion.hpp"
 #include "mpu9250.hpp"
+#include "serial_comm.hpp"
 #include "setup_motor_id.hpp"
 #include "xl9535.hpp"
 
@@ -19,7 +19,7 @@ extern "C" void app_main(void) {
   // 初始化任务看门狗（超时 3 秒，超时触发 panic）
   // 注意：不要 esp_task_wdt_add(NULL) 把 main 任务加入监控：app_main 末尾改为常驻循环，
   // 但未被 add 的任务不受 task WDT 约束，循环内 vTaskDelay 会正常让出 CPU。
-  // 各常驻任务（imu_sample / motion_task / micro_ros_task）在各自线程内
+  // 各常驻任务（imu_sample / motion_task / serial_rx / serial_status）在各自线程内
   // 自行 esp_task_wdt_add + esp_task_wdt_reset 管理。
   // esp_task_wdt_config_t wdt_cfg = {
   //     .timeout_ms = 3000,      // 3 秒超时
@@ -71,13 +71,12 @@ extern "C" void app_main(void) {
     esplog::error("Battery init failed");
   }
 
-  // 总线舵机（UART2 驱动）：micro-ROS 上报 ServoStatus，接收 ServoCmd 目标角度与转动时间（驱动层限位 0~170 deg）
+  // 总线舵机（UART2 驱动）：自定义串口上报 ServoStatus，接收 ServoCmd 目标角度与转动时间（驱动层限位 0~170 deg）
   BusServo.begin();
 
-  // micro-ROS 通信（传输方式由 Kconfig 决定，当前为串口 UART0 / 115200）
-  // Agent 重连 + IMU/ServoStatus 发布 + velcmd/servo_cmd 订阅（OrangePi 手柄节点）
-  // RosNode 运行时直接读取全局 Imu 实例
-  RosNode.begin();
+  // 自定义串口通信（UART0 / GPIO43-44 / 115200，上位机 OrangePi /dev/ttyS4）
+  // 周期上报 IMU/ServoStatus/XL9535/IR/Motion/Battery，接收 velcmd/servo_cmd/battery_current_offset
+  SerialComm.begin();
 
   // app_main 不再返回：每 1s 依据电池充放电状态设置 LED 闪烁节奏。
   // 放电：亮 100ms / 灭 900ms（慢闪）；充电：亮 100ms / 灭 100ms（快闪）。

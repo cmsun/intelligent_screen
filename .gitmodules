@@ -2,7 +2,3 @@
 	path = components/esplog
 	url = https://github.com/cmsun/esplog
 	branch = main
-[submodule "components/micro_ros"]
-	path = components/micro_ros
-	url = https://github.com/micro-ROS/micro_ros_espidf_component
-	branch = humble

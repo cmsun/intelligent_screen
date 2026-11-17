@@ -16,6 +16,6 @@ dependencies:
 direct_dependencies:
 - espressif/fmt
 - idf
-manifest_hash: ed9b0ea839b1d33122124a307bf91ef218809c6ce907fd57d742103234b9f349
+manifest_hash: b5aa21569f7a1f8433e73b893023a70c0bfdf3b269fcd8053a93547ea00dff82
 target: esp32s3
 version: 3.0.0
